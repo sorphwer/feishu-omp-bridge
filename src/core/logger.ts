@@ -29,7 +29,7 @@ const STDOUT_INFO_ALLOWLIST = new Set<string>([
  * Structured logger.
  *
  * Two destinations on every call:
- *  1. JSON line into `~/.feishu-codex-bridge/logs/YYYY-MM-DD.log` — the durable
+ *  1. JSON line into `~/.feishu-omp-bridge/logs/YYYY-MM-DD.log` — the durable
  *     record `/doctor` greps over.
  *  2. Compact human-readable line on stdout/stderr — for live tailing in dev.
  *
@@ -240,11 +240,11 @@ export function newTraceId(): string {
 
 /**
  * Scrub a log buffer of identifying / credential material before it leaves
- * the local machine — specifically, before /doctor feeds it to Codex (the
- * OpenAI API will see it) and before the analysis card lands in a
+ * local machine — specifically, before /doctor feeds it to OMP (the
+ * model provider will see it) and before the analysis card lands in a
  * Feishu chat (the Lark server may cache card contents).
  *
- * Conservative: keeps log structure intact so Codex can still correlate by
+ * Conservative: keeps log structure intact so OMP can still correlate by
  * traceId / phase / event. Only the *values* of identifying fields shrink
  * to a last-6-char suffix, and known credential fields become [REDACTED].
  *

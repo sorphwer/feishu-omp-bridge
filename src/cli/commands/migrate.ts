@@ -16,7 +16,7 @@ interface LegacyShape {
  * One-shot migrator for two pre-0.1.11 changes:
  *
  *  1. Path: ~/.config/feishu-codex-bridge/ + ~/.cache/feishu-codex-bridge/
- *     → ~/.feishu-codex-bridge/
+ *     → ~/.feishu-omp-bridge/
  *  2. Shape: { app: {...} } → { accounts: { app: {...} } }
  *
  * Idempotent — running on an already-migrated setup is a no-op.

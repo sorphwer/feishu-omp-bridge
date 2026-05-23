@@ -26,7 +26,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
           tag: 'markdown',
           content:
             '⚙️ **偏好设置**\n\n' +
-            '调整 bot 的行为偏好。改完点提交,**立即生效**(无需重启)并写入 `~/.feishu-codex-bridge/config.json`。',
+            '调整 bot 的行为偏好。改完点提交,**立即生效**(无需重启)并写入 `~/.feishu-omp-bridge/config.json`。'
         },
         { tag: 'hr' },
         {
@@ -126,7 +126,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               content:
                 '\n**用户白名单**(`allowedUsers`)\n' +
                 '_只允许列表内的 open_id 跟 bot 交互。多个用英文逗号分隔。留空 = 不限制_\n' +
-                '_open_id 可从日志 `~/.feishu-codex-bridge/logs/*.log` 里 grep `senderId` 字段_',
+                '_open_id 可从日志 `~/.feishu-omp-bridge/logs/*.log` 里 grep `senderId` 字段_',
             },
             {
               tag: 'input',

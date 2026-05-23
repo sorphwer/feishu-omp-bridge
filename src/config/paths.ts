@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-const appDir = join(homedir(), '.feishu-codex-bridge');
+const appDir = join(homedir(), '.feishu-omp-bridge');
 
 export const paths = {
   appDir,
@@ -14,6 +14,7 @@ export const paths = {
   keystoreSaltFile: join(appDir, '.keystore.salt'),
   secretsGetterScript: join(appDir, 'secrets-getter'),
   mediaDir: join(appDir, 'media'),
+  ompSessionsDir: join(appDir, 'omp-sessions'),
 };
 
 export const legacyPaths = {

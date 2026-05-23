@@ -10,12 +10,12 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 
 /** Marker key on a button's value object that flags the cardAction as
- * a callback that should be forwarded back to Codex instead of dispatched
+ * a callback that should be forwarded back to the agent instead of dispatched
  * to a built-in command handler. The double-underscore sigils make it
  * virtually impossible to collide with normal payload fields the agent
  * might set.
  */
-const CODEX_CALLBACK_MARKER = '__codex_cb';
+const AGENT_CALLBACK_MARKER = '__codex_cb';
 
 export interface CardDispatchDeps {
   channel: LarkChannel;
@@ -71,12 +71,12 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     return;
   }
 
-  // Codex-driven callback: the button was rendered by Codex itself via
+  // Agent-driven callback: the button was rendered by OMP via
   // lark-cli, with `__codex_cb` set on the value. Forward the click back
-  // into the scope's pending queue so Codex resumes its session and sees
+  // into the scope's pending queue so OMP resumes its session and sees
   // the click as a follow-up message, with full context of what it sent.
-  if (CODEX_CALLBACK_MARKER in payload) {
-    forwardToCodex(deps, payload, formValue, scope, threadId);
+  if (AGENT_CALLBACK_MARKER in payload) {
+    forwardToAgent(deps, payload, formValue, scope, threadId);
     return;
   }
 
@@ -147,17 +147,17 @@ async function lookupMessageThreadId(
   }
 }
 
-function forwardToCodex(
+function forwardToAgent(
   deps: CardDispatchDeps,
   payload: Record<string, unknown>,
   formValue: Record<string, unknown> | undefined,
   scope: string,
   threadId: string | undefined,
 ): void {
-  // Strip the marker so Codex only sees the meaningful fields it set.
-  const { [CODEX_CALLBACK_MARKER]: _marker, ...codexPayload } = payload;
-  const merged = formValue ? { ...codexPayload, form_value: formValue } : codexPayload;
-  log.info('cardAction', 'forward-codex', {
+  // Strip the marker so OMP only sees the meaningful fields it set.
+  const { [AGENT_CALLBACK_MARKER]: _marker, ...agentPayload } = payload;
+  const merged = formValue ? { ...agentPayload, form_value: formValue } : agentPayload;
+  log.info('cardAction', 'forward-agent', {
     scope,
     payload: JSON.stringify(merged).slice(0, 200),
   });

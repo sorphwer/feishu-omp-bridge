@@ -1,10 +1,10 @@
 import { log } from '../core/logger';
 
 /**
- * FIFO concurrency cap for Codex runs. Especially useful in topic-group
+ * FIFO concurrency cap for OMP runs. Especially useful in topic-group
  * scenarios where each topic spawns its own run — without a cap, a single
- * busy group could trivially explode to dozens of concurrent Codex
- * subprocesses, drowning RAM and OpenAI API rate limit.
+ * busy group could trivially explode to dozens of concurrent OMP
+ * subprocesses, drowning RAM and API rate limits.
  *
  * Use:
  *   const pool = new ProcessPool();

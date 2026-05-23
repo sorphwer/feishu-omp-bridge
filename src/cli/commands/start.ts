@@ -1,14 +1,21 @@
 import dns from 'node:dns';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
-import { CodexAdapter } from '../../agent';
+import { OmpAdapter } from '../../agent';
 import { startChannel, type BridgeChannel } from '../../bot/channel';
 import { runRegistrationWizard } from '../../bot/wizard';
 import type { Controls } from '../../commands';
 import { setSecret } from '../../config/keystore';
 import { paths } from '../../config/paths';
 import type { AppConfig } from '../../config/schema';
-import { getCodexBinary, isComplete, secretKeyForApp } from '../../config/schema';
+import {
+  getOmpBinary,
+  getOmpSessionDir,
+  getOmpThinking,
+  getOmpTools,
+  isComplete,
+  secretKeyForApp,
+} from '../../config/schema';
 import {
   buildEncryptedAccountConfig,
   ensureSecretsGetterWrapper,
@@ -76,10 +83,15 @@ export async function runStart(opts: StartOptions): Promise<void> {
 
   await preFlightChecks({ skipCheckLarkCli: opts.skipCheckLarkCli });
 
-  const agent = new CodexAdapter({ binary: getCodexBinary(cfg) });
+  const agent = new OmpAdapter({
+    binary: getOmpBinary(cfg),
+    sessionDir: getOmpSessionDir(cfg),
+    thinking: getOmpThinking(cfg),
+    tools: getOmpTools(cfg),
+  });
   if (!(await agent.isAvailable())) {
-    console.error('✗ 未找到 codex CLI。请先安装并登录 Codex：');
-    console.error('  codex login');
+    console.error('✗ 未找到 omp CLI。请先安装并完成 Oh My Pi 配置：');
+    console.error('  omp');
     process.exit(1);
   }
 
@@ -302,7 +314,7 @@ async function maybeMigratePlaintextSecret(
       );
       await setSecret(secretKeyForApp(cfg.accounts.app.id), s);
       await saveConfig(next, configPath);
-      console.log('🔒 已把 App Secret 加密迁移到 ~/.feishu-codex-bridge/secrets.enc');
+      console.log('🔒 已把 App Secret 加密迁移到 ~/.feishu-omp-bridge/secrets.enc');
       return next;
     } catch (err) {
       log.warn('config', 'migrate-encrypted-failed', {

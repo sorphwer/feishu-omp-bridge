@@ -8,8 +8,8 @@ import { paths } from './paths';
  * Local AES-256-GCM keystore for App Secrets and similar.
  *
  * Layout on disk:
- *   ~/.feishu-codex-bridge/secrets.enc      — JSON map { id → encrypted envelope }
- *   ~/.feishu-codex-bridge/.keystore.salt   — 32 random bytes, generated once
+ *   ~/.feishu-omp-bridge/secrets.enc      — JSON map { id → encrypted envelope }
+ *   ~/.feishu-omp-bridge/.keystore.salt   — 32 random bytes, generated once
  *
  * Both files are chmod 0600. The encryption key is derived (PBKDF2-SHA256,
  * 100k iters) from `hostname + userInfo().username + salt`. This is

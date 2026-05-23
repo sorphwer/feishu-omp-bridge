@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { getCodexBinary, getCodexModel, type AppConfig } from './schema';
+import {
+  getOmpBinary,
+  getOmpModel,
+  getOmpSessionDir,
+  getOmpThinking,
+  getOmpTools,
+  type AppConfig,
+} from './schema';
 
 function cfg(preferences: AppConfig['preferences'] = {}): AppConfig {
   return {
@@ -8,17 +15,30 @@ function cfg(preferences: AppConfig['preferences'] = {}): AppConfig {
   };
 }
 
-describe('Codex preferences', () => {
-  it('defaults Codex binary to codex', () => {
-    expect(getCodexBinary(cfg())).toBe('codex');
+describe('OMP preferences', () => {
+  it('defaults OMP binary to omp', () => {
+    expect(getOmpBinary(cfg())).toBe('omp');
   });
 
-  it('trims configured Codex binary and model', () => {
-    expect(getCodexBinary(cfg({ codexBinary: ' /opt/bin/codex ' }))).toBe('/opt/bin/codex');
-    expect(getCodexModel(cfg({ codexModel: ' gpt-5.1 ' }))).toBe('gpt-5.1');
+  it('trims configured OMP binary and model', () => {
+    expect(getOmpBinary(cfg({ ompBinary: ' /opt/bin/omp ' }))).toBe('/opt/bin/omp');
+    expect(getOmpModel(cfg({ ompModel: ' gpt-5.5 ' }))).toBe('gpt-5.5');
   });
 
-  it('omits an empty Codex model so Codex config can decide', () => {
-    expect(getCodexModel(cfg({ codexModel: '   ' }))).toBeUndefined();
+  it('falls back to legacy Codex binary and model when OMP fields are absent', () => {
+    expect(getOmpBinary(cfg({ codexBinary: ' /opt/bin/codex ' }))).toBe('/opt/bin/codex');
+    expect(getOmpModel(cfg({ codexModel: ' gpt-5.1 ' }))).toBe('gpt-5.1');
+  });
+
+  it('omits empty optional OMP flags', () => {
+    expect(getOmpModel(cfg({ ompModel: '   ' }))).toBeUndefined();
+    expect(getOmpThinking(cfg({ ompThinking: '   ' }))).toBeUndefined();
+    expect(getOmpTools(cfg({ ompTools: '   ' }))).toBeUndefined();
+  });
+
+  it('trims OMP thinking, tools, and session dir', () => {
+    expect(getOmpThinking(cfg({ ompThinking: ' xhigh ' }))).toBe('xhigh');
+    expect(getOmpTools(cfg({ ompTools: ' read,bash ' }))).toBe('read,bash');
+    expect(getOmpSessionDir(cfg({ ompSessionDir: ' /tmp/sessions ' }))).toBe('/tmp/sessions');
   });
 });

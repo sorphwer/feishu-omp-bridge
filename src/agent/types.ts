@@ -35,10 +35,10 @@ export interface AgentRun {
    * fired first (caller usually wants to fall back to stop()).
    *
    * Use this after a terminal stream event (`done` / `error`): the
-   * stream-json `result` line arrives before Codex has actually closed
-   * stdout — there's a brief telemetry/cleanup tail in between. Calling
-   * stop() in that window forces a SIGTERM and the run exits with code
-   * 143 instead of 0; waiting it out lets it exit cleanly.
+   * The terminal event may arrive before the adapter process has actually
+   * closed stdout — there can be a brief telemetry/cleanup tail in between.
+   * Calling stop() in that window forces termination and can turn a clean run
+   * into a signal exit; waiting it out lets it exit cleanly.
    */
   waitForExit(timeoutMs: number): Promise<boolean>;
 }

@@ -23,7 +23,7 @@ export interface LauncherInputs {
  * Generate the .cmd wrapper script that the scheduled task actually invokes.
  *
  * schtasks `/TR` can accept a direct command, but we need stdout/stderr
- * redirection + a PATH override so child tools (lark-cli, Codex) resolve
+ * redirection + a PATH override so child tools (lark-cli, OMP) resolve
  * correctly when the daemon runs under Task Scheduler. A `.cmd` script
  * is the natural place for both.
  *

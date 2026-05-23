@@ -1,3 +1,5 @@
+import { paths } from './paths';
+
 export type TenantBrand = 'feishu' | 'lark';
 
 /**
@@ -72,7 +74,7 @@ export type MessageReplyMode = 'card' | 'markdown' | 'text';
  * Access control settings. All three lists default to "no restriction" when
  * empty / undefined, so existing deployments are not broken on upgrade.
  * Operators that want a hardened deployment fill these in via
- * `~/.feishu-codex-bridge/config.json` (no CLI surface yet — by design, since
+ * `~/.feishu-omp-bridge/config.json` (no CLI surface yet — by design, since
  * persisting the lists requires the operator to look up open_ids/chat_ids
  * out-of-band anyway).
  */
@@ -90,9 +92,19 @@ export interface AppAccess {
 }
 
 export interface AppPreferences {
-  /** Codex executable name or path. Default: codex. */
+  /** OMP executable name or path. Default: omp. */
+  ompBinary?: string;
+  /** Optional OMP model passed as `--model`. Empty means OMP config decides. */
+  ompModel?: string;
+  /** Optional OMP thinking level passed as `--thinking`. */
+  ompThinking?: string;
+  /** Optional OMP session directory. Defaults to the bridge-owned session dir. */
+  ompSessionDir?: string;
+  /** Optional comma-separated OMP tool allowlist passed as `--tools`. */
+  ompTools?: string;
+  /** Legacy Codex executable name or path. Used only when `ompBinary` is absent. */
   codexBinary?: string;
-  /** Optional Codex model passed as `-m`. Empty means Codex config decides. */
+  /** Legacy Codex model. Used only when `ompModel` is absent. */
   codexModel?: string;
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
@@ -107,19 +119,19 @@ export interface AppPreferences {
   messageReplyMigrated?: boolean;
   /**
    * Whether to render tool-call blocks (Bash / Read / Edit / ...) in the
-   * output. Default true. Turn off if you only care about Codex's final
+   * output. Default true. Turn off if you only care about OMP's final
    * text answer and want to hide the "工具调用过程".
    */
   showToolCalls?: boolean;
   /**
-   * Cap on concurrent Codex runs across all chats / topics. Excess runs
+   * Cap on concurrent OMP runs across all chats / topics. Excess runs
    * queue FIFO. Default 10. Mostly relevant for topic groups where each
    * topic can spawn its own run; capping protects RAM / token spend.
    */
   maxConcurrentRuns?: number;
   /**
-   * Global default idle-timeout for Codex runs, in minutes. When set,
-   * if Codex emits no stream event for this long the bridge kills the
+   * Global default idle-timeout for OMP runs, in minutes. When set,
+   * if OMP emits no stream event for this long the bridge kills the
    * run as presumed-hung. Undefined / 0 = no timeout (the default — runs
    * can hang indefinitely). Per-scope `/timeout` overrides this.
    */
@@ -128,7 +140,7 @@ export interface AppPreferences {
    * Whether the bot only responds to messages that @-mention it in groups
    * (regular and topic groups). p2p is always unrestricted. Default true:
    * groups are quiet unless the user @bot. Set false to let any group
-   * message reach Codex (the 0.1.21-and-earlier behavior).
+   * message reach OMP (the 0.1.21-and-earlier behavior).
    *
    * @全员 is never responded to regardless (SDK `respondToMentionAll: false`).
    * Cloud-doc comments still require @-mention unconditionally.
@@ -137,9 +149,9 @@ export interface AppPreferences {
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
   /**
-   * Grace period (ms) between SIGTERM and SIGKILL when killing the Codex
-   * subprocess. Bumped from a hardcoded 500ms because Codex often has its
-   * own subprocesses (e.g. lark-cli mid-OAuth) that need a moment to clean
+   * Grace period (ms) between SIGTERM and SIGKILL when killing the OMP
+   * subprocess. Bumped from a hardcoded 500ms because agents often have
+   * their own subprocesses (e.g. lark-cli mid-OAuth) that need a moment to clean
    * up — too short a window and the SIGKILL cascade kills the descendants
    * before they can finish what the user is waiting on. Default 5000ms.
    * Range 100-30000; out-of-range values fall back to default.
@@ -195,14 +207,32 @@ export function secretKeyForApp(appId: string): string {
  *
  * Default for fresh configs (no `messageReply` set) is `'markdown'`.
  */
-export function getCodexBinary(cfg: AppConfig): string {
-  const raw = cfg.preferences?.codexBinary;
-  if (typeof raw !== 'string' || raw.trim() === '') return 'codex';
+export function getOmpBinary(cfg: AppConfig): string {
+  const raw = cfg.preferences?.ompBinary ?? cfg.preferences?.codexBinary;
+  if (typeof raw !== 'string' || raw.trim() === '') return 'omp';
   return raw.trim();
 }
 
-export function getCodexModel(cfg: AppConfig): string | undefined {
-  const raw = cfg.preferences?.codexModel;
+export function getOmpModel(cfg: AppConfig): string | undefined {
+  const raw = cfg.preferences?.ompModel ?? cfg.preferences?.codexModel;
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  return raw.trim();
+}
+
+export function getOmpThinking(cfg: AppConfig): string | undefined {
+  const raw = cfg.preferences?.ompThinking;
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  return raw.trim();
+}
+
+export function getOmpSessionDir(cfg: AppConfig): string {
+  const raw = cfg.preferences?.ompSessionDir;
+  if (typeof raw !== 'string' || raw.trim() === '') return paths.ompSessionsDir;
+  return raw.trim();
+}
+
+export function getOmpTools(cfg: AppConfig): string | undefined {
+  const raw = cfg.preferences?.ompTools;
   if (typeof raw !== 'string' || raw.trim() === '') return undefined;
   return raw.trim();
 }
@@ -225,7 +255,7 @@ export function getShowToolCalls(cfg: AppConfig): boolean {
 export function getMaxConcurrentRuns(cfg: AppConfig): number {
   const raw = cfg.preferences?.maxConcurrentRuns;
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) return 10;
-  // Reasonable upper bound — at 50+ concurrent Codex processes the bot box is
+  // Reasonable upper bound — at 50+ concurrent OMP processes the bot box is
   // probably already RAM-starved. Clamp to keep typos from killing the box.
   return Math.min(Math.floor(raw), 50);
 }
@@ -246,7 +276,7 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
  * the user didn't really mean.
  */
 /**
- * Grace period before SIGKILL fallback when stopping a Codex subprocess.
+ * Grace period before SIGKILL fallback when stopping an OMP subprocess.
  * Returns ms. Defaults to 5000 (5 seconds). Clamps to [100, 30000] so a
  * typo can't either make stop() effectively SIGKILL-immediate or hang for
  * minutes.

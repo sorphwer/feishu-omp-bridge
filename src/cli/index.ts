@@ -22,8 +22,8 @@ const DEFAULT_COMMAND = 'run';
 const program = new Command();
 
 program
-  .name('feishu-codex-bridge')
-  .description('Bridge Feishu/Lark messenger with the local Codex CLI')
+  .name('feishu-omp-bridge')
+  .description('Bridge Feishu/Lark messenger with the local Oh My Pi CLI')
   .version(pkg.version, '-v, --version');
 
 // === process-level commands (work directly on bridge processes) ===
@@ -91,7 +91,7 @@ program
 
 const secrets = program
   .command('secrets')
-  .description('Manage the bridge\'s encrypted secret keystore (~/.feishu-codex-bridge/secrets.enc)');
+  .description('Manage the bridge\'s encrypted secret keystore (~/.feishu-omp-bridge/secrets.enc)');
 
 secrets
   .command('get')

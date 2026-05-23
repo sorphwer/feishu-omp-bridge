@@ -1,4 +1,4 @@
-import { CodexAdapter } from '../../agent';
+import { OmpAdapter } from '../../agent';
 import { isComplete } from '../../config/schema';
 import { loadConfig } from '../../config/store';
 import { daemonStderrPath, daemonStdoutPath } from '../../daemon/paths';
@@ -83,7 +83,7 @@ async function ensureBridgeConfigured(): Promise<void> {
 }
 
 /**
- * Poll `~/.feishu-codex-bridge/processes.json` for a freshly-registered bridge
+ * Poll `~/.feishu-omp-bridge/processes.json` for a freshly-registered bridge
  * instance whose appId matches our config and whose `botName` is filled —
  * the latter only happens AFTER the WS handshake to Feishu succeeds, so
  * by the time we see it the daemon is genuinely online.
@@ -138,7 +138,7 @@ async function reportConnectAfter(
 
   const entry = await waitForServiceConnect(appId, beforePids);
   if (entry) {
-    const agent = new CodexAdapter();
+    const agent = new OmpAdapter();
     const verbZh = verb === 'started' ? '已启动' : '已重启';
     console.log(
       `✓ ${verbZh}  bot: ${entry.botName} (${entry.appId})  agent: ${agent.displayName} (${agent.id})  进程: ${entry.id}`,
@@ -290,7 +290,7 @@ export async function runServiceStatus(): Promise<void> {
  * `bridge unregister` — stop, disable autostart, and remove the service
  * definition file.
  *
- * Idempotent. Leaves ~/.feishu-codex-bridge/ state untouched (keystore, sessions,
+ * Idempotent. Leaves ~/.feishu-omp-bridge/ state untouched (keystore, sessions,
  * logs etc) — that's the user's data, not service-manager hooks.
  */
 export async function runServiceUnregister(): Promise<void> {
@@ -309,5 +309,5 @@ export async function runServiceUnregister(): Promise<void> {
   }
   await adapter.deleteFile();
   console.log('✓ 已清除后台运行注册');
-  console.log('  (配置 / 日志 / 会话保留在 ~/.feishu-codex-bridge/)');
+  console.log('  (配置 / 日志 / 会话保留在 ~/.feishu-omp-bridge/)');
 }
