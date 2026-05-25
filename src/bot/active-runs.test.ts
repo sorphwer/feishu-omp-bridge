@@ -36,4 +36,24 @@ describe('ActiveRuns OMP UI routing', () => {
   it('returns false when no active run can accept the response', () => {
     expect(new ActiveRuns().respondToUi('missing', 'ui-1', { cancelled: true })).toBe(false);
   });
+
+  it('routes mid-run prompts to the active run', async () => {
+    const activeRuns = new ActiveRuns();
+    const prompts: Array<{ kind: string; message: string; imagePaths?: string[] }> = [];
+    const run: AgentRun = {
+      events: emptyEvents(),
+      stop: async () => {},
+      waitForExit: async () => true,
+      async submitPrompt(kind, message, imagePaths) {
+        prompts.push({ kind, message, imagePaths });
+        return true;
+      },
+    };
+
+    activeRuns.register('scope-1', run);
+
+    await expect(activeRuns.submitPrompt('scope-1', 'follow_up', 'next', ['a.png'])).resolves.toBe(true);
+    expect(activeRuns.has('scope-1')).toBe(true);
+    expect(prompts).toEqual([{ kind: 'follow_up', message: 'next', imagePaths: ['a.png'] }]);
+  });
 });

@@ -22,6 +22,45 @@ export interface AgentUiWidget {
   placement?: 'aboveEditor' | 'belowEditor';
 }
 
+export interface AgentHostToolDefinition {
+  name: string;
+  label?: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  hidden?: boolean;
+}
+
+export interface AgentHostToolResult {
+  result: unknown;
+  isError?: boolean;
+}
+
+export interface AgentHostTool {
+  definition: AgentHostToolDefinition;
+  execute(args: Record<string, unknown>): Promise<AgentHostToolResult>;
+}
+
+export interface AgentHostUriSchemeDefinition {
+  scheme: string;
+  description?: string;
+  writable?: boolean;
+  immutable?: boolean;
+}
+
+export interface AgentHostUriResult {
+  content?: string;
+  contentType?: 'text/markdown' | 'application/json' | 'text/plain';
+  notes?: string[];
+  immutable?: boolean;
+  isError?: boolean;
+  error?: string;
+}
+
+export interface AgentHostUriScheme {
+  definition: AgentHostUriSchemeDefinition;
+  handle(req: { operation: 'read' | 'write'; url: string; content?: string }): Promise<AgentHostUriResult>;
+}
+
 export type AgentEvent =
   | { type: 'system'; sessionId?: string; cwd?: string; model?: string }
   | { type: 'text'; delta: string }
@@ -57,12 +96,15 @@ export interface AgentRunOptions {
    * are adapter-specific.
    */
   stopGraceMs?: number;
+  hostTools?: AgentHostTool[];
+  hostUriSchemes?: AgentHostUriScheme[];
 }
 
 export interface AgentRun {
   readonly events: AsyncIterable<AgentEvent>;
   stop(): Promise<void>;
   respondToUi?(requestId: string, response: AgentUiResponse): boolean;
+  submitPrompt?(kind: 'steer' | 'follow_up', message: string, imagePaths?: string[]): Promise<boolean>;
   /**
    * Wait up to `timeoutMs` for the agent process to exit on its own.
    * Resolves true if it exited within the window, false if the timer

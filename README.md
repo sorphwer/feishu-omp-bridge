@@ -8,6 +8,9 @@ A lightweight bot that bridges Feishu / Lark messenger with the local Oh My Pi C
 - Streams OMP text, thinking, tool calls, tool updates, and tool results into Feishu cards or Markdown.
 - Maps OMP native UI requests (`confirm`, `select`, `input`, `editor`) to Feishu interactive cards and sends the chosen response back to the live RPC run.
 - Renders OMP extension `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, and `open_url` events in the Feishu run output.
+- Registers Feishu-native OMP host tools (`feishu_current_context`, `feishu_send_message`, `feishu_reply_message`, `feishu_get_message`) so OMP can use Feishu without shelling out to `lark-cli`.
+- Registers the `feishu://` host URI scheme for OMP reads such as `feishu://current/context` and `feishu://message/<message_id>`.
+- Routes messages sent while OMP is still running into the live run as OMP `follow_up`; prefix with `!` to send a steering message.
 - Stores one OMP session id per chat / topic and resumes with `omp --mode rpc --resume <session_id>`.
 - Keeps bridge commands: `/new`, `/cd`, `/ws`, `/status`, `/config`, `/stop`, `/timeout`, `/ps`, `/exit`, `/reconnect`, and `/doctor`.
 - Downloads images / files to local paths; images are converted to OMP RPC image payloads.
@@ -144,6 +147,24 @@ Set these under `preferences` in `config.json`:
 - `ompTools`: comma-separated tool allowlist passed to `omp --tools`; leave empty to enable OMP defaults.
 - `messageReply`: `card`, `markdown`, or `text`.
 - `showToolCalls`: whether tool execution details are shown in cards / Markdown.
+
+## Feishu-native OMP host surface
+
+Every OMP run started by the bridge registers these host tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `feishu_current_context` | Return the current scope, chat, topic, triggering message, and cwd. |
+| `feishu_send_message` | Send markdown to the current chat or an explicit `chatId`. |
+| `feishu_reply_message` | Reply with markdown to the triggering message or an explicit `messageId`. |
+| `feishu_get_message` | Fetch and normalize a Feishu message by `messageId`. |
+
+The bridge also registers `feishu://` as a read-only host URI scheme:
+
+- `feishu://current/context`
+- `feishu://message/<message_id>`
+
+Messages posted to the same chat/topic while a run is active are sent to OMP as `follow_up` instead of waiting for a second run. Start a message with `!` to send it as `steer`.
 
 Legacy `codexBinary` and `codexModel` are still read as fallbacks when the OMP fields are absent, so older config files can boot and be migrated manually.
 

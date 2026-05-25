@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../../core/logger';
-import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions, AgentUiResponse } from '../types';
+import type { AgentAdapter, AgentEvent, AgentHostTool, AgentHostUriScheme, AgentRun, AgentRunOptions, AgentUiResponse } from '../types';
 import { buildOmpArgs, buildOmpPrompt } from './args';
 import {
   isReadyFrame,
@@ -123,6 +123,16 @@ export class OmpAdapter implements AgentAdapter {
         if (child.exitCode !== null || child.signalCode !== null) return false;
         return writeFrame(child, { type: 'extension_ui_response', id: requestId, ...response });
       },
+      async submitPrompt(kind: 'steer' | 'follow_up', message: string, imagePaths?: string[]): Promise<boolean> {
+        if (child.exitCode !== null || child.signalCode !== null) return false;
+        const images = await loadOmpImages(imagePaths);
+        return writeFrame(child, {
+          id: `${kind}_${Date.now()}`,
+          type: kind,
+          message: buildOmpPrompt(message),
+          ...(images.length > 0 ? { images } : {}),
+        });
+      },
       waitForExit(timeoutMs: number): Promise<boolean> {
         return waitForExitWithin(child, timeoutMs);
       },
@@ -160,6 +170,20 @@ async function* createEventStream(
       if (isReadyFrame(parsed)) {
         sawReady = true;
         try {
+          if (opts.hostTools && opts.hostTools.length > 0) {
+            writeFrameOrThrow(child, {
+              id: 'host_tools_1',
+              type: 'set_host_tools',
+              tools: opts.hostTools.map((tool) => tool.definition),
+            });
+          }
+          if (opts.hostUriSchemes && opts.hostUriSchemes.length > 0) {
+            writeFrameOrThrow(child, {
+              id: 'host_uri_schemes_1',
+              type: 'set_host_uri_schemes',
+              schemes: opts.hostUriSchemes.map((scheme) => scheme.definition),
+            });
+          }
           writeFrameOrThrow(child, { id: 'state_1', type: 'get_state' });
           const images = await loadOmpImages(opts.imagePaths);
           writeFrameOrThrow(child, {
@@ -179,6 +203,18 @@ async function* createEventStream(
       }
 
 
+      if (isHostToolCall(parsed)) {
+        yield* handleHostToolCall(child, opts.hostTools ?? [], parsed);
+        continue;
+      }
+      if (isHostUriRequest(parsed)) {
+        yield* handleHostUriRequest(child, opts.hostUriSchemes ?? [], parsed);
+        continue;
+      }
+      if (isHostToolCancel(parsed) || isHostUriCancel(parsed)) {
+        log.info('agent', 'host-cancel', { frame: JSON.stringify(parsed).slice(0, 300) });
+        continue;
+      }
       for (const event of translateOmpFrame(parsed)) {
         yield event;
         if (event.type === 'done' || event.type === 'error') terminal = true;
@@ -247,4 +283,124 @@ function waitForExitWithin(child: OmpChild, timeoutMs: number): Promise<boolean>
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+interface HostToolCallFrame {
+  type: 'host_tool_call';
+  id: string;
+  toolCallId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+}
+
+interface HostUriRequestFrame {
+  type: 'host_uri_request';
+  id: string;
+  operation: 'read' | 'write';
+  url: string;
+  content?: string;
+}
+
+async function* handleHostToolCall(
+  child: OmpChild,
+  tools: readonly AgentHostTool[],
+  frame: HostToolCallFrame,
+): AsyncGenerator<AgentEvent> {
+  yield { type: 'tool_use', id: frame.toolCallId, name: frame.toolName, input: frame.arguments };
+  const tool = tools.find((candidate) => candidate.definition.name === frame.toolName);
+  if (!tool) {
+    const message = `unknown host tool: ${frame.toolName}`;
+    writeFrame(child, { type: 'host_tool_result', id: frame.id, result: textToolResult(message), isError: true });
+    yield { type: 'tool_result', id: frame.toolCallId, output: message, isError: true };
+    return;
+  }
+
+  try {
+    const out = await tool.execute(frame.arguments);
+    writeFrame(child, { type: 'host_tool_result', id: frame.id, result: normalizeToolResult(out.result), isError: out.isError === true });
+    yield { type: 'tool_result', id: frame.toolCallId, output: renderHostResult(out.result), isError: out.isError === true };
+  } catch (err) {
+    const message = errorText(err);
+    writeFrame(child, { type: 'host_tool_result', id: frame.id, result: textToolResult(message), isError: true });
+    yield { type: 'tool_result', id: frame.toolCallId, output: message, isError: true };
+  }
+}
+
+async function* handleHostUriRequest(
+  child: OmpChild,
+  schemes: readonly AgentHostUriScheme[],
+  frame: HostUriRequestFrame,
+): AsyncGenerator<AgentEvent> {
+  const toolId = frame.id;
+  yield { type: 'tool_use', id: toolId, name: `host_uri_${frame.operation}`, input: { url: frame.url } };
+  const scheme = schemeOf(frame.url);
+  const handler = scheme ? schemes.find((candidate) => candidate.definition.scheme === scheme) : undefined;
+  if (!handler) {
+    const error = `unknown host URI scheme: ${scheme ?? frame.url}`;
+    writeFrame(child, { type: 'host_uri_result', id: frame.id, isError: true, error });
+    yield { type: 'tool_result', id: toolId, output: error, isError: true };
+    return;
+  }
+
+  try {
+    const out = await handler.handle({ operation: frame.operation, url: frame.url, content: frame.content });
+    writeFrame(child, { type: 'host_uri_result', id: frame.id, ...out });
+    yield { type: 'tool_result', id: toolId, output: out.error ?? out.content ?? 'ok', isError: out.isError === true };
+  } catch (err) {
+    const error = errorText(err);
+    writeFrame(child, { type: 'host_uri_result', id: frame.id, isError: true, error });
+    yield { type: 'tool_result', id: toolId, output: error, isError: true };
+  }
+}
+
+function isHostToolCall(value: unknown): value is HostToolCallFrame {
+  return isRecord(value) &&
+    value.type === 'host_tool_call' &&
+    typeof value.id === 'string' &&
+    typeof value.toolCallId === 'string' &&
+    typeof value.toolName === 'string' &&
+    isRecord(value.arguments);
+}
+
+function isHostUriRequest(value: unknown): value is HostUriRequestFrame {
+  return isRecord(value) &&
+    value.type === 'host_uri_request' &&
+    typeof value.id === 'string' &&
+    (value.operation === 'read' || value.operation === 'write') &&
+    typeof value.url === 'string' &&
+    (value.content === undefined || typeof value.content === 'string');
+}
+
+function isHostToolCancel(value: unknown): boolean {
+  return isRecord(value) && value.type === 'host_tool_cancel';
+}
+
+function isHostUriCancel(value: unknown): boolean {
+  return isRecord(value) && value.type === 'host_uri_cancel';
+}
+
+function schemeOf(url: string): string | undefined {
+  const match = /^([a-z][a-z0-9+.-]*):/i.exec(url);
+  return match?.[1];
+}
+
+function normalizeToolResult(result: unknown): unknown {
+  if (isRecord(result) && Array.isArray(result.content)) return result;
+  return textToolResult(renderHostResult(result));
+}
+
+function textToolResult(text: string): { content: Array<{ type: 'text'; text: string }> } {
+  return { content: [{ type: 'text', text }] };
+}
+
+function renderHostResult(result: unknown): string {
+  if (typeof result === 'string') return result;
+  try {
+    return JSON.stringify(result, null, 2);
+  } catch {
+    return String(result);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }

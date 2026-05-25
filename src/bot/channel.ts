@@ -40,6 +40,7 @@ import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { handleCommentMention } from './comments';
+import { createFeishuHostIntegration } from './feishu-host';
 import { expandInteractiveCard } from './interactive-card';
 import { startKeepalive } from './keepalive';
 import { configureNetwork } from './network-config';
@@ -228,6 +229,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           sessions,
           workspaces,
           activeRuns,
+          media,
           pending,
           msg,
           controls,
@@ -337,6 +339,7 @@ interface IntakeDeps {
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   activeRuns: ActiveRuns;
+  media: MediaCache;
   pending: PendingQueue;
   msg: NormalizedMessage;
   controls: Controls;
@@ -350,6 +353,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     sessions,
     workspaces,
     activeRuns,
+    media,
     pending,
     msg,
     controls,
@@ -426,8 +430,36 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  if (await submitToActiveRun({ channel, activeRuns, media, msg, scope })) {
+    log.info('intake', 'submitted-active-run', { scope });
+    return;
+  }
+
   const size = pending.push(scope, msg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+}
+
+async function submitToActiveRun(deps: {
+  channel: LarkChannel;
+  activeRuns: ActiveRuns;
+  media: MediaCache;
+  msg: NormalizedMessage;
+  scope: string;
+}): Promise<boolean> {
+  const { channel, activeRuns, media, msg, scope } = deps;
+  if (!activeRuns.has(scope)) return false;
+  const resources = msg.resources.map((resource) => ({ messageId: msg.messageId, resource }));
+  const attachments = await media.resolve(msg.chatId, resources);
+  const imagePaths = attachments.filter((attachment) => attachment.kind === 'image').map((attachment) => attachment.path);
+  const quotes: QuotedContext[] = [];
+  if (msg.replyToMessageId) {
+    const quote = await fetchQuotedContext(channel, msg.replyToMessageId);
+    if (quote) quotes.push(quote);
+  }
+  const prompt = buildPrompt([msg], attachments, quotes);
+  const trimmed = msg.content.trimStart();
+  const kind = trimmed.startsWith('!') ? 'steer' : 'follow_up';
+  return activeRuns.submitPrompt(scope, kind, prompt, imagePaths);
 }
 
 interface RunBatchDeps {
@@ -521,6 +553,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
+  const feishuHost = createFeishuHostIntegration(channel, {
+    scope,
+    chatId,
+    threadId,
+    replyToMessageId: lastMsg.messageId,
+    cwd,
+  });
+
   const run = agent.run({
     prompt,
     sessionId: resumeFrom,
@@ -528,6 +568,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     model: getOmpModel(controls.cfg),
     imagePaths,
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    hostTools: feishuHost.tools,
+    hostUriSchemes: feishuHost.uriSchemes,
   });
   const handle = activeRuns.register(scope, run);
 

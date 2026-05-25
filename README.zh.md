@@ -8,6 +8,9 @@
 - 流式卡片展示 OMP 文本、thinking、工具调用、工具更新和工具输出。
 - 把 OMP 原生 UI 请求（`confirm`、`select`、`input`、`editor`）映射成飞书交互卡片，并把用户选择实时写回同一个 RPC run。
 - 在飞书输出里展示 OMP extension 的 `notify`、`setStatus`、`setWidget`、`setTitle`、`set_editor_text` 和 `open_url` 事件。
+- 注册飞书原生 OMP host tools（`feishu_current_context`、`feishu_send_message`、`feishu_reply_message`、`feishu_get_message`），让 OMP 不经 `lark-cli` 也能直接使用飞书能力。
+- 注册只读 `feishu://` host URI scheme，例如 `feishu://current/context` 和 `feishu://message/<message_id>`。
+- OMP 运行中同一 chat/topic 再发消息会直接进入当前 run 的 `follow_up`；消息以 `!` 开头则作为 `steer`。
 - 每个 chat / topic 保存自己的 OMP session id，下一轮自动用 `omp --mode rpc --resume <session_id>` 继续。
 - 保留 bridge 命令：`/new`、`/cd`、`/ws`、`/status`、`/config`、`/stop`、`/timeout`、`/ps`、`/exit`、`/reconnect`、`/doctor`。
 - 图片 / 文件会下载到本地路径；图片会转成 OMP RPC image payload。
@@ -144,6 +147,24 @@ feishu-omp-bridge unregister            删除 daemon 注册文件
 - `ompTools`：传给 `omp --tools` 的逗号分隔工具白名单；留空则启用 OMP 默认工具集。
 - `messageReply`：`card`、`markdown` 或 `text`。
 - `showToolCalls`：是否在卡片 / Markdown 中展示工具调用过程。
+
+## 飞书原生 OMP host 能力
+
+bridge 启动的每个 OMP run 都会注册这些 host tools：
+
+| Tool | 用途 |
+| --- | --- |
+| `feishu_current_context` | 返回当前 scope、chat、topic、触发消息和 cwd。 |
+| `feishu_send_message` | 向当前 chat 或显式 `chatId` 发送 Markdown。 |
+| `feishu_reply_message` | 回复触发消息或显式 `messageId`。 |
+| `feishu_get_message` | 按 `messageId` 拉取并规范化飞书消息。 |
+
+bridge 还会注册只读 `feishu://` host URI：
+
+- `feishu://current/context`
+- `feishu://message/<message_id>`
+
+同一 chat/topic 在 OMP 运行中继续发消息时，会作为 `follow_up` 进入当前 run，而不是等当前 run 结束后另起一轮。消息以 `!` 开头时会作为 `steer` 发送。
 
 旧配置里的 `codexBinary` 和 `codexModel` 仍会作为 fallback 读取，便于旧配置启动后手动迁移。
 

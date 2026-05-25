@@ -95,6 +95,56 @@ for await (const line of rl) {
     await expect(iterator.next()).resolves.toEqual({ done: false, value: { type: 'done' } });
   });
 
+  it('registers and serves OMP host tools and URI schemes', async () => {
+    const binary = await fakeOmp(`
+import { createInterface } from 'node:readline';
+console.log(JSON.stringify({ type: 'ready' }));
+const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
+let sawTools = false;
+let sawSchemes = false;
+for await (const line of rl) {
+  const frame = JSON.parse(line);
+  if (frame.type === 'set_host_tools' && frame.tools?.[0]?.name === 'bridge_echo') sawTools = true;
+  if (frame.type === 'set_host_uri_schemes' && frame.schemes?.[0]?.scheme === 'bridge') sawSchemes = true;
+  if (frame.type === 'prompt') {
+    if (!sawTools || !sawSchemes) process.exit(8);
+    console.log(JSON.stringify({ type: 'host_tool_call', id: 'host-1', toolCallId: 'tool-1', toolName: 'bridge_echo', arguments: { message: 'hi' } }));
+  }
+  if (frame.type === 'host_tool_result' && frame.id === 'host-1') {
+    console.log(JSON.stringify({ type: 'host_uri_request', id: 'uri-1', operation: 'read', url: 'bridge://context' }));
+  }
+  if (frame.type === 'host_uri_result' && frame.id === 'uri-1') {
+    console.log(JSON.stringify({ type: 'agent_end' }));
+  }
+}
+`);
+
+    const run = new OmpAdapter({ binary }).run({
+      prompt: 'ping',
+      cwd: tmpdir(),
+      hostTools: [{
+        definition: { name: 'bridge_echo', description: 'Echo a message', parameters: { type: 'object' } },
+        async execute(args) {
+          return { result: `echo:${String(args.message)}` };
+        },
+      }],
+      hostUriSchemes: [{
+        definition: { scheme: 'bridge', description: 'Bridge test scheme' },
+        async handle(req) {
+          return { content: `uri:${req.url}`, contentType: 'text/plain' };
+        },
+      }],
+    });
+
+    await expect(collect(run.events)).resolves.toEqual([
+      { type: 'tool_use', id: 'tool-1', name: 'bridge_echo', input: { message: 'hi' } },
+      { type: 'tool_result', id: 'tool-1', output: 'echo:hi', isError: false },
+      { type: 'tool_use', id: 'uri-1', name: 'host_uri_read', input: { url: 'bridge://context' } },
+      { type: 'tool_result', id: 'uri-1', output: 'uri:bridge://context', isError: false },
+      { type: 'done' },
+    ]);
+  });
+
   it('surfaces non-zero OMP exits after stdout closes', async () => {
     const binary = await fakeOmp(`
 console.error('auth required');
