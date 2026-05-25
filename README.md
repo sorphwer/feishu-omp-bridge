@@ -2,8 +2,6 @@
 
 把飞书 / Lark 消息接入本地 Oh My Pi CLI 的桥接服务。它会把私聊、群聊、话题群、云文档评论中的消息转给 `omp --mode rpc`，再把 OMP 的文本、thinking、工具调用、工具增量、原生 UI 交互和结果流式回写到飞书。
 
-> 当前仓库：<https://github.com/Gyarados4157/feishu-omp-bridge>
-
 ## 项目定位
 
 `feishu-omp-bridge` 不是重新实现一个飞书机器人框架，而是把已有 Feishu/Lark 桥接层和 OMP 的 RPC Agent 能力接起来：
@@ -478,15 +476,6 @@ pnpm build
 | 飞书 API 工具不可用 | 按启动提示安装并绑定 `lark-cli`；或者优先使用已注册的 Feishu host tools。 |
 | `/new chat` 失败 | 确认 bot 具备创建群相关权限，代码中该能力依赖 `im:chat`。 |
 | 后台 daemon 不工作 | 运行 `node bin/feishu-omp-bridge.mjs status` 查看服务状态和日志路径。 |
-
-## 从 feishu-codex-bridge 迁移
-
-这个项目保留了原有 Feishu/Lark 桥接层的大部分结构，但底层 Agent 从 Codex CLI JSONL 切换为 OMP RPC：
-
-- 包名和 CLI：`feishu-omp-bridge`
-- 默认应用目录：`~/.feishu-omp-bridge`
-- OMP session 目录：`~/.feishu-omp-bridge/omp-sessions`
-- 旧配置中的 `codexBinary` / `codexModel` 仍作为 fallback 读取，便于手动迁移到 `ompBinary` / `ompModel`。
 
 ## 当前限制
 
