@@ -64,27 +64,35 @@ for await (const line of rl) {
     await expect(run.waitForExit(100)).resolves.toBe(true);
   });
 
-  it('auto-cancels blocking extension UI requests before continuing', async () => {
+  it('keeps blocking extension UI requests interactive and accepts responses', async () => {
     const binary = await fakeOmp(`
 import { createInterface } from 'node:readline';
 console.log(JSON.stringify({ type: 'ready' }));
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
-let sawCancel = false;
 for await (const line of rl) {
   const frame = JSON.parse(line);
   if (frame.type === 'prompt') {
+    console.log(JSON.stringify({ id: frame.id, type: 'response', command: 'prompt', success: true }));
     console.log(JSON.stringify({ type: 'extension_ui_request', id: 'ui-1', method: 'confirm', title: 'Confirm', message: 'Continue?' }));
   }
-  if (frame.type === 'extension_ui_response' && frame.id === 'ui-1' && frame.cancelled === true) {
-    sawCancel = true;
+  if (frame.type === 'extension_ui_response' && frame.id === 'ui-1' && frame.confirmed === true) {
     console.log(JSON.stringify({ type: 'agent_end' }));
   }
 }
-if (!sawCancel) process.exit(8);
 `);
 
     const run = new OmpAdapter({ binary }).run({ prompt: 'ping', cwd: tmpdir() });
-    await expect(collect(run.events)).resolves.toEqual([{ type: 'done' }]);
+    const iterator = run.events[Symbol.asyncIterator]();
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: {
+        type: 'ui_request',
+        request: { id: 'ui-1', method: 'confirm', title: 'Confirm', message: 'Continue?' },
+      },
+    });
+    expect(run.respondToUi?.('ui-1', { confirmed: true })).toBe(true);
+    await expect(iterator.next()).resolves.toEqual({ done: false, value: { type: 'done' } });
   });
 
   it('surfaces non-zero OMP exits after stdout closes', async () => {

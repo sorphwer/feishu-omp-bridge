@@ -7,6 +7,14 @@ import { runCommandHandler, type CommandContext, type Controls } from '../comman
 import { isChatAllowed, isUserAllowed } from '../config/schema';
 import { log } from '../core/logger';
 import type { SessionStore } from '../session/store';
+import { updateManagedCard } from './managed';
+import {
+  isOmpUiPayload,
+  ompUiRequestId,
+  ompUiTitle,
+  renderOmpUiResultCard,
+  responseFromOmpUiAction,
+} from './omp-ui';
 import type { WorkspaceStore } from '../workspace/store';
 
 /** Marker key on a button's value object that flags the cardAction as
@@ -68,6 +76,11 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     log.info('cardAction', 'skip-not-allowed-chat', {
       chatId: chatId.slice(-6),
     });
+    return;
+  }
+
+  if (isOmpUiPayload(payload)) {
+    await respondToOmpUi(deps, payload, formValue, scope);
     return;
   }
 
@@ -177,6 +190,31 @@ function forwardToAgent(
     createTime: Date.now(),
   };
   deps.pending.push(scope, synthetic);
+}
+
+async function respondToOmpUi(
+  deps: CardDispatchDeps,
+  payload: Record<string, unknown>,
+  formValue: Record<string, unknown> | undefined,
+  scope: string,
+): Promise<void> {
+  const requestId = ompUiRequestId(payload);
+  const title = ompUiTitle(payload);
+  const response = responseFromOmpUiAction(payload, formValue);
+  const targetScope = typeof payload.scope === 'string' ? payload.scope : scope;
+  const submitted = Boolean(requestId && response && deps.activeRuns.respondToUi(targetScope, requestId, response));
+  const status = submitted
+    ? response && 'cancelled' in response
+      ? 'cancelled'
+      : 'submitted'
+    : 'unavailable';
+
+  log.info('cardAction', 'omp-ui', { scope: targetScope, requestId, submitted, status });
+  try {
+    await updateManagedCard(deps.channel, deps.evt.messageId, renderOmpUiResultCard(title, status));
+  } catch (err) {
+    log.fail('cardAction', err, { step: 'omp-ui-update', requestId });
+  }
 }
 
 /** Turn a button payload like {cmd:'ws.use', name:'proj-a'} into the arg

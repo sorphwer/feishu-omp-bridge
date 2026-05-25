@@ -3,10 +3,9 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../../core/logger';
-import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions, AgentUiResponse } from '../types';
 import { buildOmpArgs, buildOmpPrompt } from './args';
 import {
-  extensionUiAutoResponse,
   isReadyFrame,
   loadOmpImages,
   parseOmpJsonLine,
@@ -120,6 +119,10 @@ export class OmpAdapter implements AgentAdapter {
         child.kill('SIGKILL');
         await waitForExit(child);
       },
+      respondToUi(requestId: string, response: AgentUiResponse): boolean {
+        if (child.exitCode !== null || child.signalCode !== null) return false;
+        return writeFrame(child, { type: 'extension_ui_response', id: requestId, ...response });
+      },
       waitForExit(timeoutMs: number): Promise<boolean> {
         return waitForExitWithin(child, timeoutMs);
       },
@@ -175,11 +178,6 @@ async function* createEventStream(
         continue;
       }
 
-      const uiResponse = extensionUiAutoResponse(parsed);
-      if (uiResponse) {
-        writeFrame(child, uiResponse);
-        continue;
-      }
 
       for (const event of translateOmpFrame(parsed)) {
         yield event;

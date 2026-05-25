@@ -5,8 +5,10 @@ import type {
   NormalizedMessage,
 } from '@larksuiteoapi/node-sdk';
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk';
-import type { AgentAdapter } from '../agent/types';
+import type { AgentAdapter, AgentUiRequest } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
+import { sendManagedCard, updateManagedCard } from '../card/managed';
+import { renderOmpUiRequestCard, renderOmpUiResultCard } from '../card/omp-ui';
 import { renderCard } from '../card/run-renderer';
 import {
   finalizeIfRunning,
@@ -441,6 +443,11 @@ interface RunBatchDeps {
   mode: ChatMode;
 }
 
+interface AgentStreamHooks {
+  onUiRequest(request: AgentUiRequest): Promise<void>;
+  onUiCancel(targetId: string): Promise<void>;
+}
+
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
@@ -555,6 +562,33 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
   };
 
+  const uiCards = new Map<string, { messageId: string; title: string }>();
+  const uiHooks: AgentStreamHooks = {
+    async onUiRequest(request) {
+      try {
+        const existing = uiCards.get(request.id);
+        if (existing) {
+          await updateManagedCard(channel, existing.messageId, renderOmpUiRequestCard(request, scope));
+          existing.title = request.title;
+          return;
+        }
+        const sent = await sendManagedCard(channel, chatId, renderOmpUiRequestCard(request, scope), lastMsg.messageId);
+        uiCards.set(request.id, { messageId: sent.messageId, title: request.title });
+      } catch (err) {
+        log.fail('omp-ui', err, { scope, requestId: request.id, method: request.method });
+      }
+    },
+    async onUiCancel(targetId) {
+      const entry = uiCards.get(targetId);
+      if (!entry) return;
+      try {
+        await updateManagedCard(channel, entry.messageId, renderOmpUiResultCard(entry.title, 'cancelled'));
+      } catch (err) {
+        log.fail('omp-ui', err, { scope, requestId: targetId, step: 'cancel-update' });
+      }
+    },
+  };
+
   // For non-card modes OMP's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
   // Add a "Typing" reaction to the triggering message as an instant ack;
@@ -573,7 +607,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             producer: async (ctrl) => {
               await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
                 await ctrl.update(renderCard(filterForPrefs(state)));
-              });
+              }, uiHooks);
             },
           },
         },
@@ -586,7 +620,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           markdown: async (ctrl) => {
             await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
               await ctrl.setContent(renderText(filterForPrefs(state)));
-            });
+            }, uiHooks);
           },
         },
         sendOpts,
@@ -598,7 +632,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       let finalState: RunState = initialState;
       await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
         finalState = state;
-      });
+      }, uiHooks);
       const body = renderText(filterForPrefs(finalState));
       if (body.trim()) {
         await channel.send(chatId, { markdown: body }, sendOpts);
@@ -626,6 +660,7 @@ async function processAgentStream(
   cwd: string,
   idleTimeoutMs: number | undefined,
   flush: (state: RunState) => Promise<void>,
+  hooks?: AgentStreamHooks,
 ): Promise<void> {
   let state: RunState = initialState;
 
@@ -634,11 +669,9 @@ async function processAgentStream(
   //
   // BUT — OMP can legitimately be silent for a long time when it's
   // waiting on a long-running tool call (e.g. `lark-cli` printing an
-  // OAuth URL and blocking until the user clicks authorize). In that
-  // case there's no event stream activity from OMP itself, only the
-  // tool subprocess running. We track which tool_use ids haven't matched
-  // a tool_result yet, and pause the watchdog whenever the set is
-  // non-empty.
+  // OAuth URL and blocking until the user clicks authorize) or on an OMP
+  // native UI prompt that the user must answer from a Feishu card.
+  // Pause the watchdog while either a tool or UI request is in flight.
   //
   // The watchdog re-arms when:
   //  - a tool_result drains the in-flight set to zero, OR
@@ -650,7 +683,7 @@ async function processAgentStream(
     if (!idleTimeoutMs) return;
     if (timer) clearTimeout(timer);
     timer = undefined;
-    if (inFlightTools.size > 0) return;
+    if (inFlightTools.size > 0 || handle.pendingUiRequests.size > 0) return;
     timer = setTimeout(() => {
       idleFired = true;
       handle.interrupted = true;
@@ -660,15 +693,16 @@ async function processAgentStream(
       });
     }, idleTimeoutMs);
   };
+  handle.onUiSettled = armOrPauseIdle;
   armOrPauseIdle();
 
   try {
     for await (const evt of handle.run.events) {
       if (handle.interrupted) break;
 
-      // Track tool flight before re-arming the idle timer so the arm step
-      // sees the correct set size. tool_use opens a window; tool_result
-      // closes it. Other event types are bookkept after the if/else.
+      // Track tool/UI flight before re-arming the idle timer so the arm step
+      // sees the correct set size. tool_use/ui_request open a window;
+      // tool_result/ui response/cancel closes it.
       if (evt.type === 'tool_use') {
         inFlightTools.add(evt.id);
         log.info('agent', 'tool-in-flight', {
@@ -678,6 +712,12 @@ async function processAgentStream(
       } else if (evt.type === 'tool_result') {
         inFlightTools.delete(evt.id);
         log.info('agent', 'tool-done', { inFlight: inFlightTools.size });
+      } else if (evt.type === 'ui_request') {
+        handle.pendingUiRequests.add(evt.request.id);
+        log.info('agent', 'ui-in-flight', { method: evt.request.method, inFlight: handle.pendingUiRequests.size });
+      } else if (evt.type === 'ui_cancel') {
+        handle.pendingUiRequests.delete(evt.targetId);
+        log.info('agent', 'ui-cancelled', { inFlight: handle.pendingUiRequests.size });
       }
       armOrPauseIdle();
 
@@ -695,6 +735,11 @@ async function processAgentStream(
         }
         continue;
       }
+      if (evt.type === 'ui_request') {
+        await hooks?.onUiRequest(evt.request);
+      } else if (evt.type === 'ui_cancel') {
+        await hooks?.onUiCancel(evt.targetId);
+      }
 
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
@@ -709,6 +754,7 @@ async function processAgentStream(
       if (state.terminal !== 'running') break;
     }
   } finally {
+    if (handle.onUiSettled === armOrPauseIdle) handle.onUiSettled = undefined;
     if (timer) clearTimeout(timer);
   }
 

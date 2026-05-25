@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
-import type { AgentEvent } from '../types';
+import type { AgentEvent, AgentUiNoticeType } from '../types';
 
 interface OmpModel {
   provider?: string;
@@ -44,8 +44,25 @@ interface OmpFrame {
   args?: unknown;
   result?: unknown;
   isError?: boolean;
-  message?: OmpMessage;
+  message?: OmpMessage | string;
+  partialResult?: unknown;
   method?: string;
+  title?: string;
+  options?: unknown;
+  timeout?: number;
+  placeholder?: string;
+  prefill?: string;
+  promptStyle?: boolean;
+  targetId?: string;
+  notifyType?: string;
+  statusKey?: string;
+  statusText?: string;
+  widgetKey?: string;
+  widgetLines?: unknown;
+  widgetPlacement?: string;
+  text?: string;
+  url?: string;
+  instructions?: string;
 }
 
 export interface OmpImageContent {
@@ -68,20 +85,8 @@ export function isReadyFrame(raw: unknown): boolean {
   return isRecord(raw) && raw.type === 'ready';
 }
 
-export function extensionUiAutoResponse(raw: unknown): Record<string, unknown> | undefined {
-  if (!isRecord(raw) || raw.type !== 'extension_ui_request' || typeof raw.id !== 'string') {
-    return undefined;
-  }
-
-  switch (raw.method) {
-    case 'select':
-    case 'confirm':
-    case 'input':
-    case 'editor':
-      return { type: 'extension_ui_response', id: raw.id, cancelled: true };
-    default:
-      return undefined;
-  }
+export function isExtensionUiRequest(raw: unknown): boolean {
+  return isRecord(raw) && raw.type === 'extension_ui_request' && typeof raw.id === 'string';
 }
 
 export function* translateOmpFrame(raw: unknown): Generator<AgentEvent> {
@@ -105,6 +110,15 @@ export function* translateOmpFrame(raw: unknown): Generator<AgentEvent> {
         };
       }
       return;
+    case 'tool_execution_update':
+      if (frame.toolCallId) {
+        yield {
+          type: 'tool_update',
+          id: frame.toolCallId,
+          output: renderToolResult(frame.partialResult),
+        };
+      }
+      return;
     case 'tool_execution_end':
       if (frame.toolCallId) {
         yield {
@@ -116,8 +130,8 @@ export function* translateOmpFrame(raw: unknown): Generator<AgentEvent> {
       }
       return;
     case 'turn_end':
-      if (frame.message?.usage) {
-        yield usageEvent(frame.message.usage);
+      if (isRecord(frame.message) && isRecord(frame.message.usage)) {
+        yield usageEvent(frame.message.usage as OmpUsage);
       }
       return;
     case 'agent_end':
@@ -125,6 +139,9 @@ export function* translateOmpFrame(raw: unknown): Generator<AgentEvent> {
       return;
     case 'notice':
       if (typeof frame.error === 'string') yield { type: 'error', message: frame.error };
+      return;
+    case 'extension_ui_request':
+      yield* translateExtensionUiRequest(frame);
       return;
     default:
       return;
@@ -167,6 +184,119 @@ function* translateMessageUpdate(evt: OmpAssistantEvent | undefined): Generator<
   if (evt.type === 'thinking_delta' && typeof evt.delta === 'string') {
     yield { type: 'thinking', delta: evt.delta };
   }
+}
+
+function* translateExtensionUiRequest(frame: OmpFrame): Generator<AgentEvent> {
+  if (!frame.id || !frame.method) return;
+  switch (frame.method) {
+    case 'select': {
+      const options = stringArray(frame.options);
+      if (typeof frame.title === 'string' && options.length > 0) {
+        yield {
+          type: 'ui_request',
+          request: { id: frame.id, method: 'select', title: frame.title, options, timeout: frame.timeout },
+        };
+      }
+      return;
+    }
+    case 'confirm':
+      if (typeof frame.title === 'string' && typeof frame.message === 'string') {
+        yield {
+          type: 'ui_request',
+          request: {
+            id: frame.id,
+            method: 'confirm',
+            title: frame.title,
+            message: frame.message,
+            timeout: frame.timeout,
+          },
+        };
+      }
+      return;
+    case 'input':
+      if (typeof frame.title === 'string') {
+        yield {
+          type: 'ui_request',
+          request: {
+            id: frame.id,
+            method: 'input',
+            title: frame.title,
+            placeholder: frame.placeholder,
+            timeout: frame.timeout,
+          },
+        };
+      }
+      return;
+    case 'editor':
+      if (typeof frame.title === 'string') {
+        yield {
+          type: 'ui_request',
+          request: {
+            id: frame.id,
+            method: 'editor',
+            title: frame.title,
+            prefill: frame.prefill,
+            promptStyle: frame.promptStyle,
+          },
+        };
+      }
+      return;
+    case 'cancel':
+      if (typeof frame.targetId === 'string') yield { type: 'ui_cancel', targetId: frame.targetId };
+      return;
+    case 'notify':
+      if (typeof frame.message === 'string') {
+        yield { type: 'ui_notice', message: frame.message, level: noticeType(frame.notifyType) };
+      }
+      return;
+    case 'setStatus':
+      if (typeof frame.statusKey === 'string') {
+        yield { type: 'ui_status', status: { key: frame.statusKey, text: frame.statusText } };
+      }
+      return;
+    case 'setWidget':
+      if (typeof frame.widgetKey === 'string') {
+        yield {
+          type: 'ui_widget',
+          widget: {
+            key: frame.widgetKey,
+            lines: stringArrayOrUndefined(frame.widgetLines),
+            placement: widgetPlacement(frame.widgetPlacement),
+          },
+        };
+      }
+      return;
+    case 'setTitle':
+      if (typeof frame.title === 'string') yield { type: 'ui_title', title: frame.title };
+      return;
+    case 'set_editor_text':
+      if (typeof frame.text === 'string') yield { type: 'ui_editor_text', text: frame.text };
+      return;
+    case 'open_url':
+      if (typeof frame.url === 'string') {
+        yield { type: 'ui_open_url', url: frame.url, instructions: frame.instructions };
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function stringArrayOrUndefined(value: unknown): string[] | undefined {
+  const items = stringArray(value);
+  return items.length > 0 ? items : undefined;
+}
+
+function noticeType(value: unknown): AgentUiNoticeType | undefined {
+  return value === 'info' || value === 'warning' || value === 'error' ? value : undefined;
+}
+
+function widgetPlacement(value: unknown): 'aboveEditor' | 'belowEditor' | undefined {
+  return value === 'aboveEditor' || value === 'belowEditor' ? value : undefined;
 }
 
 function usageEvent(usage: OmpUsage): AgentEvent {

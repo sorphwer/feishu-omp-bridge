@@ -5,7 +5,9 @@
 ## 能干什么
 
 - 在飞书私聊、群聊 `@bot`、话题群 topic、云文档评论 `@bot` 中把消息转给本地 OMP。
-- 流式卡片展示 OMP 文本、thinking、工具调用和工具输出。
+- 流式卡片展示 OMP 文本、thinking、工具调用、工具更新和工具输出。
+- 把 OMP 原生 UI 请求（`confirm`、`select`、`input`、`editor`）映射成飞书交互卡片，并把用户选择实时写回同一个 RPC run。
+- 在飞书输出里展示 OMP extension 的 `notify`、`setStatus`、`setWidget`、`setTitle`、`set_editor_text` 和 `open_url` 事件。
 - 每个 chat / topic 保存自己的 OMP session id，下一轮自动用 `omp --mode rpc --resume <session_id>` 继续。
 - 保留 bridge 命令：`/new`、`/cd`、`/ws`、`/status`、`/config`、`/stop`、`/timeout`、`/ps`、`/exit`、`/reconnect`、`/doctor`。
 - 图片 / 文件会下载到本地路径；图片会转成 OMP RPC image payload。
@@ -151,4 +153,5 @@ feishu-omp-bridge unregister            删除 daemon 注册文件
 - OMP 没有继续上次对话：发 `/status` 查看 cwd 和 session；cwd 变化会让 bridge 自动新建 session。
 - 群聊没响应：确认消息里 `@bot`，或在 `/config` 里调整群聊 mention 策略。
 - 卡片长时间不动：可用 `/stop` 终止当前任务，或用 `/timeout 10` 为当前 session 开启 idle 探活。
+- OMP 等待选择 / 输入时：直接回复单独出现的“OMP 交互”卡片；该请求挂起期间 idle watchdog 会暂停。
 - 飞书 API 工具不可用：按启动提示安装并绑定 `lark-cli`。

@@ -5,7 +5,9 @@ A lightweight bot that bridges Feishu / Lark messenger with the local Oh My Pi C
 ## What it does
 
 - Forwards Feishu / Lark direct messages, group `@bot` messages, topic messages, and cloud-doc comment mentions to local OMP.
-- Streams OMP text, thinking, tool calls, and tool results into Feishu cards or Markdown.
+- Streams OMP text, thinking, tool calls, tool updates, and tool results into Feishu cards or Markdown.
+- Maps OMP native UI requests (`confirm`, `select`, `input`, `editor`) to Feishu interactive cards and sends the chosen response back to the live RPC run.
+- Renders OMP extension `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, and `open_url` events in the Feishu run output.
 - Stores one OMP session id per chat / topic and resumes with `omp --mode rpc --resume <session_id>`.
 - Keeps bridge commands: `/new`, `/cd`, `/ws`, `/status`, `/config`, `/stop`, `/timeout`, `/ps`, `/exit`, `/reconnect`, and `/doctor`.
 - Downloads images / files to local paths; images are converted to OMP RPC image payloads.
@@ -151,4 +153,5 @@ Legacy `codexBinary` and `codexModel` are still read as fallbacks when the OMP f
 - OMP did not resume the previous conversation: send `/status` to inspect cwd and session; a cwd change makes the bridge start a new session.
 - Group messages get no response: make sure the message mentions `@bot`, or change the mention policy with `/config`.
 - A card appears stuck: use `/stop`, or enable an idle watchdog for the current session with `/timeout 10`.
+- OMP is waiting for a choice/input: answer the separate "OMP 交互" card. The idle watchdog pauses while that UI request is pending.
 - Feishu API tools are unavailable: install and bind `lark-cli` as prompted during startup.

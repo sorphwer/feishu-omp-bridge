@@ -1,15 +1,17 @@
-import type { AgentRun } from '../agent/types';
+import type { AgentRun, AgentUiResponse } from '../agent/types';
 
 export interface RunHandle {
   run: AgentRun;
   interrupted: boolean;
+  pendingUiRequests: Set<string>;
+  onUiSettled?: () => void;
 }
 
 export class ActiveRuns {
   private readonly handles = new Map<string, RunHandle>();
 
   register(chatId: string, run: AgentRun): RunHandle {
-    const handle: RunHandle = { run, interrupted: false };
+    const handle: RunHandle = { run, interrupted: false, pendingUiRequests: new Set() };
     this.handles.set(chatId, handle);
     return handle;
   }
@@ -33,6 +35,14 @@ export class ActiveRuns {
       /* stop errors are non-fatal */
     });
     return true;
+  }
+
+  respondToUi(chatId: string, requestId: string, response: AgentUiResponse): boolean {
+    const h = this.handles.get(chatId);
+    const ok = h?.run.respondToUi?.(requestId, response) === true;
+    if (ok) h?.pendingUiRequests.delete(requestId);
+    if (ok) h?.onUiSettled?.();
+    return ok;
   }
 
   async stopAll(): Promise<void> {

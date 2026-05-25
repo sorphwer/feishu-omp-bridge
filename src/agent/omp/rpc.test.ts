@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  extensionUiAutoResponse,
+  isExtensionUiRequest,
   loadOmpImages,
   parseOmpJsonLine,
   translateOmpFrame,
@@ -67,6 +67,15 @@ describe('translateOmpFrame', () => {
     })).toEqual([
       { type: 'tool_result', id: 'tool-1', output: '/tmp\n', isError: false },
     ]);
+
+    expect(events({
+      type: 'tool_execution_update',
+      toolCallId: 'tool-1',
+      toolName: 'bash',
+      partialResult: { content: [{ type: 'text', text: 'working' }] },
+    })).toEqual([
+      { type: 'tool_update', id: 'tool-1', output: 'working' },
+    ]);
   });
 
   it('maps usage and terminal frames', () => {
@@ -87,17 +96,47 @@ describe('translateOmpFrame', () => {
   });
 });
 
-describe('extensionUiAutoResponse', () => {
-  it('cancels interactive UI requests so RPC does not hang headless', () => {
-    expect(extensionUiAutoResponse({ type: 'extension_ui_request', id: 'ui-1', method: 'confirm' })).toEqual({
-      type: 'extension_ui_response',
+describe('extension UI frames', () => {
+  it('maps blocking UI requests instead of auto-cancelling them', () => {
+    expect(isExtensionUiRequest({ type: 'extension_ui_request', id: 'ui-1', method: 'confirm' })).toBe(true);
+    expect(events({
+      type: 'extension_ui_request',
       id: 'ui-1',
-      cancelled: true,
-    });
+      method: 'confirm',
+      title: 'Confirm',
+      message: 'Continue?',
+      timeout: 30000,
+    })).toEqual([
+      {
+        type: 'ui_request',
+        request: {
+          id: 'ui-1',
+          method: 'confirm',
+          title: 'Confirm',
+          message: 'Continue?',
+          timeout: 30000,
+        },
+      },
+    ]);
   });
 
-  it('ignores non-blocking UI notifications', () => {
-    expect(extensionUiAutoResponse({ type: 'extension_ui_request', id: 'ui-1', method: 'setWidget' })).toBeUndefined();
+  it('maps non-blocking UI updates to state events', () => {
+    expect(events({
+      type: 'extension_ui_request',
+      id: 'status-1',
+      method: 'setStatus',
+      statusKey: 'ext',
+      statusText: 'working',
+    })).toEqual([{ type: 'ui_status', status: { key: 'ext', text: 'working' } }]);
+
+    expect(events({
+      type: 'extension_ui_request',
+      id: 'widget-1',
+      method: 'setWidget',
+      widgetKey: 'todo',
+      widgetLines: ['a', 'b'],
+      widgetPlacement: 'belowEditor',
+    })).toEqual([{ type: 'ui_widget', widget: { key: 'todo', lines: ['a', 'b'], placement: 'belowEditor' } }]);
   });
 });
 

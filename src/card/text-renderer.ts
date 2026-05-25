@@ -1,4 +1,4 @@
-import type { Block, RunState, ToolEntry } from './run-state';
+import type { Block, RunState, ToolEntry, UiState } from './run-state';
 import { toolHeaderText } from './tool-render';
 
 /**
@@ -14,6 +14,8 @@ import { toolHeaderText } from './tool-render';
 export function renderText(state: RunState): string {
   const parts: string[] = [];
 
+  const ui = renderUiContext(state.ui);
+  if (ui) parts.push(ui);
   for (const block of state.blocks) {
     const piece = renderBlock(block);
     if (piece) parts.push(piece);
@@ -50,8 +52,20 @@ function toolLine(tool: ToolEntry): string {
   return `> ${toolHeaderText(tool)}`;
 }
 
-function footerLine(status: 'thinking' | 'tool_running' | 'streaming'): string {
+function footerLine(status: 'thinking' | 'tool_running' | 'streaming' | 'waiting_input'): string {
   if (status === 'thinking') return '_🧠 正在思考…_';
   if (status === 'tool_running') return '_🧰 正在调用工具…_';
+  if (status === 'waiting_input') return '_🧩 等待用户交互…_';
   return '_✍️ 正在输出…_';
+}
+
+function renderUiContext(ui: UiState): string {
+  const lines: string[] = [];
+  if (ui.title) lines.push(`- 标题：${ui.title}`);
+  for (const [key, text] of Object.entries(ui.statuses)) lines.push(`- ${key}：${text}`);
+  for (const [key, widget] of Object.entries(ui.widgets)) {
+    lines.push(`- ${key}: ${(widget.lines ?? []).join(' / ')}`);
+  }
+  if (ui.editorText) lines.push(`- 编辑器内容：${ui.editorText.slice(0, 300)}`);
+  return lines.length > 0 ? `> 🧩 OMP 状态\n${lines.join('\n')}` : '';
 }

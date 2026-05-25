@@ -1,4 +1,4 @@
-import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
+import type { Block, FooterStatus, RunState, ToolEntry, UiState } from './run-state';
 import { toolBodyMd, toolHeaderText } from './tool-render';
 
 const REASONING_MAX = 1500;
@@ -20,6 +20,9 @@ export function renderCard(state: RunState): object {
   if (state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
   }
+
+  const ui = uiContextPanel(state.ui);
+  if (ui) elements.push(ui);
 
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === 'text') {
@@ -188,8 +191,30 @@ function footerStatus(status: Exclude<FooterStatus, null>): object {
       ? '🧠 正在思考'
       : status === 'tool_running'
         ? '🧰 正在调用工具'
-        : '✍️ 正在输出';
+        : status === 'waiting_input'
+          ? '🧩 等待用户交互'
+          : '✍️ 正在输出';
   return noteMd(text);
+}
+
+function uiContextPanel(ui: UiState): object | undefined {
+  const lines: string[] = [];
+  if (ui.title) lines.push(`**标题**：${ui.title}`);
+  for (const [key, text] of Object.entries(ui.statuses)) {
+    lines.push(`**${key}**：${text}`);
+  }
+  for (const [key, widget] of Object.entries(ui.widgets)) {
+    const placement = widget.placement ? `_${widget.placement}_` : '';
+    lines.push(`**${key}** ${placement}\n${(widget.lines ?? []).join('\n')}`.trim());
+  }
+  if (ui.editorText) lines.push(`**编辑器内容**\n\`\`\`\n${truncate(ui.editorText, 1200)}\n\`\`\``);
+  if (lines.length === 0) return undefined;
+  return collapsiblePanel({
+    title: '🧩 **OMP 状态 / Widget**',
+    expanded: true,
+    border: 'blue',
+    body: lines.join('\n\n'),
+  });
 }
 
 function summaryText(state: RunState): string {
@@ -199,6 +224,7 @@ function summaryText(state: RunState): string {
   if (state.terminal === 'done') return '已完成';
   if (state.footer === 'tool_running') return '正在调用工具';
   if (state.footer === 'streaming') return '正在输出';
+  if (state.footer === 'waiting_input') return '等待用户交互';
   return '思考中';
 }
 
