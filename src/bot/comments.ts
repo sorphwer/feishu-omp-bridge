@@ -1,10 +1,10 @@
-import { homedir } from 'node:os';
 import type { CommentEvent, LarkChannel } from '@larksuiteoapi/node-sdk';
 import type { AgentAdapter } from '../agent/types';
 import { log } from '../core/logger';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { addCommentReaction, removeCommentReaction } from './reaction';
+import { getDefaultCwd, type AppConfig } from '../config/schema';
 
 export interface CommentDeps {
   channel: LarkChannel;
@@ -12,6 +12,7 @@ export interface CommentDeps {
   agent: AgentAdapter;
   sessions: SessionStore;
   workspaces: WorkspaceStore;
+  cfg: AppConfig;
 }
 
 // File types supported by drive.v1.fileComment.get; other types (slides,
@@ -59,7 +60,7 @@ interface CommentContext {
  * a reply in the same comment thread.
  */
 export async function handleCommentMention(deps: CommentDeps): Promise<void> {
-  const { channel, evt, agent, sessions, workspaces } = deps;
+  const { channel, evt, agent, sessions, workspaces, cfg } = deps;
   // Log every comment event we receive, regardless of whether we'll act on it.
   // `mentionedBot` and `replyId` here let us tell apart top-level comments
   // from thread replies (the latter requires SDK ≥ 1.65.0-alpha.0).
@@ -107,11 +108,12 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
   const prompt = buildCommentPrompt(target, ctx);
 
   // One OMP session per cloud-doc; subsequent @-mentions in the same
-  // doc continue the same conversation. cwd defaults to $HOME — the agent
+  // doc continue the same conversation. cwd falls back to the configured
+  // defaultCwd (or $HOME) — the agent
   // probably won't do filesystem work for doc replies but we keep a sane
   // default in case it does.
   const synthChatId = `doc:${evt.fileToken}`;
-  const cwd = workspaces.cwdFor(synthChatId) ?? homedir();
+  const cwd = workspaces.cwdFor(synthChatId) ?? getDefaultCwd(cfg);
   const resumeFrom = sessions.resumeFor(synthChatId, cwd);
   log.info('comment', 'session', { synthChatId, resumeFrom: resumeFrom ?? null, cwd });
 

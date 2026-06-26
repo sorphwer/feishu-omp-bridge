@@ -1,4 +1,3 @@
-import { homedir } from 'node:os';
 import type {
   LarkChannel,
   LarkChannelOptions,
@@ -23,6 +22,7 @@ import { tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
 import {
   getAgentStopGraceMs,
+  getDefaultCwd,
   getOmpModel,
   getMaxConcurrentRuns,
   getMessageReplyMode,
@@ -257,7 +257,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {
-        await handleCommentMention({ channel, evt, agent, sessions, workspaces }).catch((err) =>
+        await handleCommentMention({ channel, evt, agent, sessions, workspaces, cfg }).catch((err) =>
           log.fail('comment', err),
         );
       }).catch((err) => log.fail('comment', err));
@@ -539,7 +539,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const prompt = buildPrompt(batch, attachments, quotes);
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
 
-  const cwd = workspaces.cwdFor(scope) ?? homedir();
+  const cwd = workspaces.cwdFor(scope) ?? getDefaultCwd(controls.cfg);
   const resumeFrom = sessions.resumeFor(scope, cwd);
   if (resumeFrom) {
     log.info('session', 'resume', { sessionId: resumeFrom, cwd });

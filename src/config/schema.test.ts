@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { homedir } from 'node:os';
 import {
   getOmpBinary,
+  getDefaultCwd,
   getOmpModel,
   getOmpSessionDir,
   getOmpThinking,
@@ -40,5 +42,21 @@ describe('OMP preferences', () => {
     expect(getOmpThinking(cfg({ ompThinking: ' xhigh ' }))).toBe('xhigh');
     expect(getOmpTools(cfg({ ompTools: ' read,bash ' }))).toBe('read,bash');
     expect(getOmpSessionDir(cfg({ ompSessionDir: ' /tmp/sessions ' }))).toBe('/tmp/sessions');
+  });
+});
+
+describe('getDefaultCwd', () => {
+  it('defaults to the home directory when unset or blank', () => {
+    expect(getDefaultCwd(cfg())).toBe(homedir());
+    expect(getDefaultCwd(cfg({ defaultCwd: '   ' }))).toBe(homedir());
+  });
+
+  it('returns a trimmed absolute path as-is', () => {
+    expect(getDefaultCwd(cfg({ defaultCwd: ' /repos/tmp ' }))).toBe('/repos/tmp');
+  });
+
+  it('expands a leading ~ to the home directory', () => {
+    expect(getDefaultCwd(cfg({ defaultCwd: '~' }))).toBe(homedir());
+    expect(getDefaultCwd(cfg({ defaultCwd: '~/repos/tmp' }))).toBe(`${homedir()}/repos/tmp`);
   });
 });

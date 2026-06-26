@@ -1,4 +1,5 @@
 import { paths } from './paths';
+import { homedir } from 'node:os';
 
 export type TenantBrand = 'feishu' | 'lark';
 
@@ -100,6 +101,10 @@ export interface AppPreferences {
   ompThinking?: string;
   /** Optional OMP session directory. Defaults to the bridge-owned session dir. */
   ompSessionDir?: string;
+  /** Default working directory for OMP runs when a chat/topic has no
+   * explicit cwd (set via /cd or /ws). Supports a leading `~`. Defaults
+   * to $HOME. */
+  defaultCwd?: string;
   /** Optional comma-separated OMP tool allowlist passed as `--tools`. */
   ompTools?: string;
   /** Legacy Codex executable name or path. Used only when `ompBinary` is absent. */
@@ -229,6 +234,15 @@ export function getOmpSessionDir(cfg: AppConfig): string {
   const raw = cfg.preferences?.ompSessionDir;
   if (typeof raw !== 'string' || raw.trim() === '') return paths.ompSessionsDir;
   return raw.trim();
+}
+
+export function getDefaultCwd(cfg: AppConfig): string {
+  const raw = cfg.preferences?.defaultCwd;
+  if (typeof raw !== 'string' || raw.trim() === '') return homedir();
+  const p = raw.trim();
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return `${homedir()}${p.slice(1)}`;
+  return p;
 }
 
 export function getOmpTools(cfg: AppConfig): string | undefined {
