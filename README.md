@@ -293,11 +293,20 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
           "appendArgs": ["-o", "json"],
           "maxOutputBytes": 100000,
           "description": "Query the Zendesk Knowledge Graph (JSON with issue/solution summaries)."
+        },
+        {
+          "name": "zendesk_docs",
+          "command": "zendesk",
+          "args": ["docs"],
+          "allowedSubcommands": ["search"],
+          "appendArgs": ["-o", "text"],
+          "maxOutputBytes": 100000,
+          "description": "Search the Zendesk Help Center (public docs/articles), plain-text output. First arg must be `search`; then `--query '<text>'` (+ optional filters)."
         }
       ],
       "extraToolAllowlist": [],
       "feishuHostTools": false,
-      "systemPrompt": "你是面向同事的 Zendesk 历史工单助手,可用 zendesk-kg 查询/分析历史工单(客户信息已脱敏)。"
+      "systemPrompt": "你是面向同事的 Zendesk 助手:zendesk_kg 查/析历史工单、zendesk_docs 搜帮助中心文档(客户信息已脱敏)。"
     }
   }
 }
