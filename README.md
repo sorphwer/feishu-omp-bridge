@@ -274,7 +274,7 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
 - `allowedUsers` 空或未设置：允许所有用户。
 - `allowedChats` 空或未设置：允许所有 chat。
 - `admins` 空或未设置：所有允许用户都可执行管理员命令。
-- 管理员命令包括：`/account`、`/config`、`/exit`、`/reconnect`、`/doctor`、`/cd`、`/ws`。
+- 管理员命令包括：`/account`、`/config`、`/switch`、`/exit`、`/reconnect`、`/doctor`、`/cd`、`/ws`。
 
 ## 数据目录
 
@@ -302,6 +302,7 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
 | `/ws add <name> <path>` | 保存当前 cwd 为命名工作空间。 |
 | `/ws use <name>` | 切换到命名工作空间并重置 session。 |
 | `/config` | 打开偏好设置卡片。 |
+| `/switch` | 弹卡片切换 OMP 模型：下拉列常用（role）模型，或输入框直接输入任意模型名（OMP 模糊匹配）。当前模型来自 `omp config modelRoles`，✅ 标已认证。写入 preferences.ompModel，立即生效，全局。 |
 | `/account` | 更换 bot app 凭据并重连。 |
 | `/status` | 查看当前 scope、cwd、session、agent。 |
 | `/stop` | 终止当前正在执行的 OMP run。 |

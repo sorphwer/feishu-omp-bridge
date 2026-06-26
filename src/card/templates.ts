@@ -111,6 +111,7 @@ export function helpCard(): object {
         '- `/ws list|save <name>|use <name>|remove <name>` — 工作空间',
         '- `/account` — 查看当前应用；`/account change` 换 appId/secret 并重连',
         '- `/config` — 调整偏好（消息回复方式、工具调用显示）',
+        '- `/switch` — 切换 OMP 模型（弹卡片下拉选择，立即生效）',
         '- `/status` — 当前状态',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
@@ -128,6 +129,7 @@ export function helpCard(): object {
       { text: '📊 状态', value: { cmd: 'status' }, style: 'primary' },
       { text: '📂 工作空间', value: { cmd: 'ws.list' } },
       { text: '🆕 新会话', value: { cmd: 'new' } },
+      { text: '🔀 切换模型', value: { cmd: 'switch' } },
     ]),
   ]);
 }

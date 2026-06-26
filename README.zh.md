@@ -12,7 +12,7 @@
 - 注册只读 `feishu://` host URI scheme，例如 `feishu://current/context` 和 `feishu://message/<message_id>`。
 - OMP 运行中同一 chat/topic 再发消息会直接进入当前 run 的 `follow_up`；消息以 `!` 开头则作为 `steer`。
 - 每个 chat / topic 保存自己的 OMP session id，下一轮自动用 `omp --mode rpc --resume <session_id>` 继续。
-- 保留 bridge 命令：`/new`、`/cd`、`/ws`、`/status`、`/config`、`/stop`、`/timeout`、`/ps`、`/exit`、`/reconnect`、`/doctor`。
+- 保留 bridge 命令：`/new`、`/cd`、`/ws`、`/status`、`/config`、`/switch`、`/stop`、`/timeout`、`/ps`、`/exit`、`/reconnect`、`/doctor`。
 - 图片 / 文件会下载到本地路径；图片会转成 OMP RPC image payload。
 - OMP 可以继续使用本机可用工具，例如 `lark-cli`、`git`、项目测试命令等。
 
@@ -94,6 +94,7 @@ feishu-omp-bridge unregister            删除 daemon 注册文件
 | `/ws add <name> <path>` | 保存命名工作空间。 |
 | `/ws use <name>` | 切换到命名工作空间并重置 session。 |
 | `/config` | 打开偏好设置卡片。 |
+| `/switch` | 弹卡片切换 OMP 模型：下拉列常用（role）模型，或输入框直接输入任意模型名（OMP 模糊匹配）。当前模型来自 `omp config modelRoles`，✅ 标已认证。写入 preferences.ompModel，立即生效，全局。 |
 | `/account` | 更换 bot app 凭据并重连。 |
 | `/status` | 查看当前 scope、cwd、session、agent。 |
 | `/stop` | 终止当前正在跑的 OMP 任务。 |

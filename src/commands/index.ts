@@ -10,13 +10,21 @@ import {
   accountSuccessCard,
 } from '../card/account-cards';
 import { configCancelledCard, configFormCard, configSavedCard } from '../card/config-card';
+import {
+  OMP_DEFAULT_MODEL_VALUE,
+  switchModelCancelledCard,
+  switchModelFormCard,
+  switchModelSavedCard,
+} from '../card/switch-card';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
 import { helpCard, statusCard, workspacesCard } from '../card/templates';
 import type { AppConfig, MessageReplyMode, TenantBrand } from '../config/schema';
+import { getAuthenticatedProviders, getDefaultRoleModel, roleModels } from '../agent';
 import {
   getAgentStopGraceMs,
   getMaxConcurrentRuns,
   getMessageReplyMode,
+  getOmpModel,
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
   getShowToolCalls,
@@ -94,6 +102,7 @@ const handlers: Record<string, Handler> = {
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
+  '/switch': handleSwitch,
   '/stop': handleStop,
   '/timeout': handleTimeout,
   '/ps': handlePs,
@@ -116,6 +125,7 @@ const ADMIN_COMMANDS = new Set([
   '/doctor',
   '/cd',
   '/ws',
+  '/switch',
 ]);
 
 function isAdminCommand(cmd: string): boolean {
@@ -1047,6 +1057,93 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
       }),
     ).catch((err) =>
       log.warn('command', 'config-save-update-failed', { err: String(err) }),
+    );
+    forgetManagedCard(formMsgId);
+  })();
+}
+
+async function handleSwitch(args: string, ctx: CommandContext): Promise<void> {
+  const sub = args.trim().split(/\s+/)[0] ?? '';
+  switch (sub) {
+    case '':
+      return showSwitchForm(ctx);
+    case 'confirm':
+      return submitSwitch(ctx);
+    case 'cancel':
+      return cancelSwitch(ctx);
+    default:
+      await reply(ctx, '用法：`/switch`');
+  }
+}
+
+async function showSwitchForm(ctx: CommandContext): Promise<void> {
+  const current = getOmpModel(ctx.controls.cfg);
+  const card = switchModelFormCard({
+    current,
+    defaultModel: getDefaultRoleModel(),
+    roleModels: roleModels(),
+    authenticated: getAuthenticatedProviders(),
+  });
+  await sendManagedCard(ctx.channel, ctx.msg.chatId, card);
+}
+
+async function cancelSwitch(ctx: CommandContext): Promise<void> {
+  if (!ctx.fromCardAction) return;
+  const formMsgId = ctx.msg.messageId;
+  const channel = ctx.channel;
+  void (async () => {
+    await new Promise((r) => setTimeout(r, FORM_SETTLE_MS));
+    await updateManagedCard(channel, formMsgId, switchModelCancelledCard()).catch((err) =>
+      log.warn('command', 'switch-cancel-update-failed', { err: String(err) }),
+    );
+    forgetManagedCard(formMsgId);
+  })();
+}
+
+async function submitSwitch(ctx: CommandContext): Promise<void> {
+  // `/switch confirm` typed as text has no form_value; treat it as a request
+  // to (re)open the picker rather than silently resetting the model.
+  if (!ctx.fromCardAction) return showSwitchForm(ctx);
+  const fv = ctx.formValue ?? {};
+  const picked = String(fv.model ?? '').trim();
+  const channel = ctx.channel;
+  const formMsgId = ctx.msg.messageId;
+  const configPath = ctx.controls.configPath;
+  void (async () => {
+    const submittedAt = Date.now();
+    const waitForSettle = async (): Promise<void> => {
+      const elapsed = Date.now() - submittedAt;
+      if (elapsed < FORM_SETTLE_MS) {
+        await new Promise<void>((r) => setTimeout(r, FORM_SETTLE_MS - elapsed));
+      }
+    };
+    // In-place mutation: controls.cfg is shared by reference with the run
+    // loop's getOmpModel(controls.cfg) read, so this takes effect on the
+    // next message. Same pattern as submitConfig.
+    const prefs = { ...(ctx.controls.cfg.preferences ?? {}) };
+    let display: string | undefined;
+    if (picked === '' || picked === OMP_DEFAULT_MODEL_VALUE) {
+      delete prefs.ompModel;
+      delete prefs.codexModel; // legacy fallback read by getOmpModel
+      display = undefined;
+    } else {
+      prefs.ompModel = picked;
+      display = picked;
+    }
+    ctx.controls.cfg.preferences = prefs;
+    try {
+      await saveConfig(ctx.controls.cfg, configPath);
+    } catch (err) {
+      log.fail('command', err, { step: 'switch.save' });
+      await waitForSettle();
+      await updateManagedCard(channel, formMsgId, switchModelCancelledCard()).catch(() => {});
+      forgetManagedCard(formMsgId);
+      return;
+    }
+    log.info('command', 'switch-model', { model: display ?? '(default)' });
+    await waitForSettle();
+    await updateManagedCard(channel, formMsgId, switchModelSavedCard(display)).catch((err) =>
+      log.warn('command', 'switch-save-update-failed', { err: String(err) }),
     );
     forgetManagedCard(formMsgId);
   })();

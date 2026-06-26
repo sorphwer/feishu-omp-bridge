@@ -1,7 +1,7 @@
 import dns from 'node:dns';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
-import { OmpAdapter } from '../../agent';
+import { OmpAdapter, setAuthenticatedProviders, setModelCatalog, setModelRoles } from '../../agent';
 import { startChannel, type BridgeChannel } from '../../bot/channel';
 import { runRegistrationWizard } from '../../bot/wizard';
 import type { Controls } from '../../commands';
@@ -94,6 +94,25 @@ export async function runStart(opts: StartOptions): Promise<void> {
     console.error('  omp');
     process.exit(1);
   }
+
+  // Probe the OMP model catalog + authenticated providers + role bindings
+  // once so `/switch` can offer a live, auth-filtered, role-pinned picker and
+  // show the effective default model. All non-fatal: empty results keep the
+  // fallback / offer-all behavior.
+  const [catalog, authProviders, roles] = await Promise.all([
+    agent.listModels(),
+    agent.listAuthenticatedProviders(),
+    agent.getModelRoles(),
+  ]);
+  setModelCatalog(catalog);
+  setAuthenticatedProviders(authProviders);
+  setModelRoles(roles);
+  log.info('agent', 'model-catalog', {
+    count: catalog.length,
+    authProviders: authProviders.join(',') || '(unknown)',
+    defaultModel: roles.default ?? '(unknown)',
+    roleModels: roles.roles.length,
+  });
 
   const sessions = new SessionStore();
   await sessions.load();

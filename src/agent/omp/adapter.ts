@@ -5,6 +5,7 @@ import type { Readable, Writable } from 'node:stream';
 import { log } from '../../core/logger';
 import type { AgentAdapter, AgentEvent, AgentHostTool, AgentHostUriScheme, AgentRun, AgentRunOptions, AgentUiResponse } from '../types';
 import { buildOmpArgs, buildOmpPrompt } from './args';
+import type { OmpModelInfo, OmpModelRoles } from './model-catalog';
 import {
   isReadyFrame,
   loadOmpImages,
@@ -43,6 +44,113 @@ export class OmpAdapter implements AgentAdapter {
       child.on('error', () => resolve(false));
       child.on('exit', (code) => resolve(code === 0));
     });
+  }
+
+  /**
+   * Run an `omp` subcommand that emits JSON on stdout and parse it. Resolves
+   * to `undefined` on any failure (binary missing, non-zero exit, unparseable)
+   * so callers fall back to a default.
+   */
+  private runJson(args: string[]): Promise<unknown> {
+    return new Promise((resolve) => {
+      const child = spawn(this.binary, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+      let out = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        out += chunk.toString('utf8');
+      });
+      child.on('error', () => resolve(undefined));
+      child.on('exit', (code) => {
+        if (code !== 0) return resolve(undefined);
+        try {
+          resolve(JSON.parse(out));
+        } catch {
+          resolve(undefined);
+        }
+      });
+    });
+  }
+
+  /**
+   * Probe the OMP model catalog via `omp models --json`. Returns the full
+   * provider/selector list so the `/switch` picker can present a live model
+   * choice rather than a hardcoded subset. Empty on any failure.
+   */
+  async listModels(): Promise<OmpModelInfo[]> {
+    const parsed = (await this.runJson(['models', '--json'])) as { models?: unknown } | undefined;
+    const raw = parsed && Array.isArray(parsed.models) ? parsed.models : [];
+    const models: OmpModelInfo[] = [];
+    for (const m of raw) {
+      if (!m || typeof m !== 'object') continue;
+      const rec = m as Record<string, unknown>;
+      const provider = typeof rec.provider === 'string' ? rec.provider : '';
+      const id = typeof rec.id === 'string' ? rec.id : '';
+      const selector = typeof rec.selector === 'string' ? rec.selector : '';
+      if (!provider || !id || !selector) continue;
+      const name = typeof rec.name === 'string' && rec.name ? rec.name : id;
+      models.push({ provider, id, selector, name });
+    }
+    return models;
+  }
+
+  /**
+   * Probe authenticated providers via `omp usage --json`. A provider counts
+   * as authenticated if it appears in `reports[]` (live usage) or
+   * `accountsWithoutUsage[]` (api-key accounts with no usage endpoint). The
+   * `/switch` picker uses this to only offer models the user can actually
+   * run. Empty on any failure — callers then fall back to offering all.
+   */
+  async listAuthenticatedProviders(): Promise<string[]> {
+    const parsed = (await this.runJson(['usage', '--json'])) as
+      | { reports?: unknown; accountsWithoutUsage?: unknown }
+      | undefined;
+    if (!parsed) return [];
+    const providers = new Set<string>();
+    const collect = (arr: unknown): void => {
+      if (!Array.isArray(arr)) return;
+      for (const r of arr) {
+        if (r && typeof r === 'object') {
+          const p = (r as Record<string, unknown>).provider;
+          if (typeof p === 'string' && p) providers.add(p);
+        }
+      }
+    };
+    collect(parsed.reports);
+    collect(parsed.accountsWithoutUsage);
+    return [...providers];
+  }
+
+  /**
+   * Probe OMP's role→model bindings via `omp config get modelRoles --json`.
+   * Returns the `default` role (the model used when no `--model` is passed)
+   * plus all distinct role-bound selectors, each with its `:thinking` suffix
+   * stripped so it matches catalog selectors. The `/switch` picker shows the
+   * default as the effective current model and lists the role models.
+   * Resolves to `{ roles: [] }` on any failure.
+   */
+  async getModelRoles(): Promise<OmpModelRoles> {
+    const parsed = (await this.runJson(['config', 'get', 'modelRoles', '--json'])) as
+      | { value?: Record<string, unknown> }
+      | undefined;
+    const value = parsed && typeof parsed.value === 'object' ? parsed.value : undefined;
+    if (!value) return { roles: [] };
+    const strip = (sel: string): string => {
+      const colon = sel.indexOf(':');
+      return colon > 0 ? sel.slice(0, colon) : sel;
+    };
+    const seen = new Set<string>();
+    const roles: string[] = [];
+    let defaultSel: string | undefined;
+    for (const [role, raw] of Object.entries(value)) {
+      if (typeof raw !== 'string' || !raw) continue;
+      const sel = strip(raw.trim());
+      if (!sel) continue;
+      if (role === 'default') defaultSel = sel;
+      if (!seen.has(sel)) {
+        seen.add(sel);
+        roles.push(sel);
+      }
+    }
+    return { default: defaultSel, roles };
   }
 
   run(opts: AgentRunOptions): AgentRun {
