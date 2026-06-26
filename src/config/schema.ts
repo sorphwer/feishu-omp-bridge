@@ -117,6 +117,8 @@ export interface CommandToolConfig {
   timeoutMs?: number;
   /** Max output bytes returned to the model. Default 30000, clamped [1000, 200000]. */
   maxOutputBytes?: number;
+  /** Max times this tool may be called per run (turn). Unset = no per-tool cap. */
+  maxCalls?: number;
 }
 
 /**
@@ -138,10 +140,13 @@ export interface GuestToolPolicy {
   extraToolAllowlist?: string[];
   /** Expose the Feishu host tools (send/reply/get message) to guests. Default false. */
   feishuHostTools?: boolean;
+  /** Total tool calls allowed per run (turn) across ALL tools. Unset/0 = no total cap. */
+  maxToolCalls?: number;
   /**
-   * System-prompt text appended (via `--append-system-prompt`) for guest runs
-   * only — gives the sandboxed agent its role/instructions without affecting
-   * trusted users. Empty/unset = no append.
+   * System-prompt text PREPENDED to the guest user prompt — gives the
+   * sandboxed agent its role/instructions without affecting trusted users.
+   * Empty/unset = none. (Prepended, not `--append-system-prompt`, which hung
+   * the codex request.)
    */
   systemPrompt?: string;
 }
@@ -439,6 +444,10 @@ export function getGuestCommandTools(cfg: AppConfig): CommandToolConfig[] {
       cwd: typeof e.cwd === 'string' && e.cwd.trim() !== '' ? e.cwd.trim() : undefined,
       timeoutMs: clampInt(e.timeoutMs, 120_000, 1000, 600_000),
       maxOutputBytes: clampInt(e.maxOutputBytes, 30_000, 1000, 200_000),
+      maxCalls:
+        typeof e.maxCalls === 'number' && Number.isFinite(e.maxCalls) && e.maxCalls > 0
+          ? Math.floor(e.maxCalls)
+          : undefined,
     });
   }
   return out;
@@ -468,4 +477,24 @@ export function getGuestSystemPrompt(cfg: AppConfig): string | undefined {
   const raw = getGuestPolicy(cfg)?.systemPrompt;
   if (typeof raw !== 'string' || raw.trim() === '') return undefined;
   return raw;
+}
+
+/** Per-run (per-turn) tool-call caps enforced by the guest hook. */
+export interface GuestToolLimits {
+  /** Total tool calls allowed across all tools. 0 = no total cap. */
+  maxTotal: number;
+  /** Per-tool-name caps. Absent name = no per-tool cap. */
+  perTool: Record<string, number>;
+}
+
+/** Resolve guest tool-call caps from policy (total + per-command-tool). */
+export function getGuestToolLimits(cfg: AppConfig): GuestToolLimits {
+  const raw = getGuestPolicy(cfg)?.maxToolCalls;
+  const maxTotal =
+    typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  const perTool: Record<string, number> = {};
+  for (const t of getGuestCommandTools(cfg)) {
+    if (typeof t.maxCalls === 'number') perTool[t.name] = t.maxCalls;
+  }
+  return { maxTotal, perTool };
 }
