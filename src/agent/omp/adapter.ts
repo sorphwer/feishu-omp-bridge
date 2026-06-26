@@ -158,7 +158,7 @@ export class OmpAdapter implements AgentAdapter {
       ...opts,
       sessionDir: this.sessionDir,
       thinking: this.thinking,
-      tools: this.tools,
+      tools: opts.tools ?? this.tools,
     });
     const child = spawn(this.binary, args, {
       cwd: opts.cwd,

@@ -62,6 +62,16 @@ export function buildOmpArgs(opts: BuildOmpArgsOptions): string[] {
   const tools = clean(opts.tools);
   if (tools) args.push('--tools', tools);
 
+  for (const overlay of opts.configOverlayPaths ?? []) {
+    const p = clean(overlay);
+    if (p) args.push('--config', p);
+  }
+
+  for (const ext of opts.extensionPaths ?? []) {
+    const p = clean(ext);
+    if (p) args.push('--extension', p);
+  }
+
   return args;
 }
 

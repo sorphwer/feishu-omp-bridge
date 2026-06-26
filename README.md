@@ -276,6 +276,48 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
 - `admins` 空或未设置：所有允许用户都可执行管理员命令。
 - 管理员命令包括：`/account`、`/config`、`/switch`、`/exit`、`/reconnect`、`/doctor`、`/cd`、`/ws`。
 
+### 访客工具沙箱（`preferences.guestPolicy`）
+
+对**非信任发送者**(例如陌生人私聊 bot)限制 agent 能用的工具,信任用户(你自己)不受任何影响、保留全部工具。
+
+```json
+{
+  "preferences": {
+    "guestPolicy": {
+      "unrestrictedUsers": ["ou_xxx"],
+      "commandTools": [
+        {
+          "name": "zendesk_kg",
+          "command": "zendesk-kg",
+          "allowedSubcommands": ["search", "stats", "health", "rate"],
+          "appendArgs": ["-o", "json"],
+          "maxOutputBytes": 100000,
+          "description": "Query the Zendesk Knowledge Graph (JSON with issue/solution summaries)."
+        }
+      ],
+      "extraToolAllowlist": [],
+      "feishuHostTools": false,
+      "systemPrompt": "你是面向同事的 Zendesk 历史工单助手,可用 zendesk-kg 查询/分析历史工单(客户信息已脱敏)。"
+    }
+  }
+}
+```
+
+语义:
+
+- **未设置 `guestPolicy`**:功能关闭,所有人都用完整工具集(向后兼容)。
+- **设置后**:符合沙箱范围(见下)的消息以受限方式运行 OMP——
+  - `commandTools` 把指定 CLI 暴露成 host tool。bridge 用 `spawn`(argv 数组、**不走 shell**)拉起,模型只能跑该二进制,无法注入管道/重定向/命令拼接。`args` 固定前缀、`appendArgs` 固定后缀(放在模型参数之后,例如 `["-o","json"]` 强制结构化完整输出——zendesk-kg 默认 table 只有 metadata);`allowedSubcommands` 限定第一个参数;`maxOutputBytes` 防止大 JSON 被截断成非法(默认 30000)。
+  - `--tools` 去掉所有内置工具(bash/eval/read/write/edit/...);`--config` overlay 关掉发现源 MCP(如任意代码执行的 `node_repl`);一个 fail-closed 的 `tool_call` hook 硬拦截白名单外的**一切**工具调用。
+  - `extraToolAllowlist`:额外允许的内置工具名(如 `read`)。默认空。
+  - `feishuHostTools`:是否给访客开放飞书 host tools(主动发/读消息)。默认 `false`。
+  - `systemPrompt`:**仅对访客**生效的提示词,会**前置到访客 prompt** 给沙箱 agent 设定角色/用途;信任用户不受影响。空/未设 = 不前置。(不用 `--append-system-prompt`——给 codex 模型追加系统块会偶发卡死无回复。)
+- `unrestrictedUsers` 未设置时回退到 `access.admins`。
+- 范围:**群/话题里一律沙箱**(连 operator 也是——群是共享空间,bot 始终是受限助手);**私聊**按发送者信任(operator 全权、其他人沙箱)。fail-closed:senderId 缺失按访客处理。要全权请私聊 bot。
+- ⚠️ 改 `guestPolicy` 后需**整进程重启** `restart`(`/reconnect` 不会重建 OMP adapter)。
+- 生成的沙箱产物在 `~/.feishu-omp-bridge/guest/`(overlay + 白名单 hook,自动维护)。
+- 本地回归验证:`pnpm test:guest`(加 `--model` 跑真实模型越权测试)。
+
 ## 数据目录
 
 | 路径 | 用途 |
@@ -286,6 +328,7 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
 | `~/.feishu-omp-bridge/secrets-getter` | exec secret provider wrapper。 |
 | `~/.feishu-omp-bridge/sessions.json` | 每个 chat/topic 的 OMP session id、cwd、timeout 覆盖。 |
 | `~/.feishu-omp-bridge/omp-sessions/` | bridge 专用 OMP JSONL session 文件。 |
+| `~/.feishu-omp-bridge/guest/` | 访客沙箱产物（OMP overlay + 工具白名单 hook，自动生成）。 |
 | `~/.feishu-omp-bridge/workspaces.json` | 命名工作空间。 |
 | `~/.feishu-omp-bridge/processes.json` | 本机 bridge 进程注册表。 |
 | `~/.feishu-omp-bridge/media/` | 下载的图片 / 文件缓存。 |
@@ -400,7 +443,8 @@ feishu://message/<message_id>
   - `preferences.access.allowedUsers`
   - `preferences.access.allowedChats`
   - `preferences.access.admins`
-  - `ompTools` 工具白名单
+  - `ompTools` 工具白名单（全局，对所有人生效）
+  - `preferences.guestPolicy` 访客工具沙箱（仅约束非信任发送者，见上文）
   - 固定工作目录 / 命名工作空间
 - 群聊默认必须 `@bot` 才响应，避免无意触发。
 - `@全员` 不会触发响应。

@@ -91,6 +91,61 @@ export interface AppAccess {
   admins?: string[];
 }
 
+/**
+ * Declares a local CLI that the agent may invoke as a host tool. The bridge
+ * spawns `command` directly (argv array, NEVER a shell), so the model can
+ * only run THIS binary with argument tokens — no pipes, redirection,
+ * globbing, command chaining, or substitution. `allowedSubcommands`, when
+ * set, additionally pins the first argument to a known-safe set.
+ */
+export interface CommandToolConfig {
+  /** Tool name exposed to the agent. Must match /^[a-zA-Z0-9_]+$/. */
+  name: string;
+  /** Executable to spawn (PATH lookup or absolute path). */
+  command: string;
+  /** Fixed leading args always prepended before model-supplied args. */
+  args?: string[];
+  /** Fixed trailing args always appended after model-supplied args (e.g. `-o json`). */
+  appendArgs?: string[];
+  /** Allowlist for the first model-supplied arg (the subcommand). Empty/unset = any. */
+  allowedSubcommands?: string[];
+  /** Description shown to the model. */
+  description?: string;
+  /** Working directory; defaults to the run cwd. */
+  cwd?: string;
+  /** Hard timeout in ms. Default 120000, clamped [1000, 600000]. */
+  timeoutMs?: number;
+  /** Max output bytes returned to the model. Default 30000, clamped [1000, 200000]. */
+  maxOutputBytes?: number;
+}
+
+/**
+ * Sandboxes NON-trusted senders. When present, any sender NOT in
+ * `unrestrictedUsers` runs OMP with a hard tool allowlist (a fail-closed
+ * `tool_call` hook), discovery sources disabled, and only the declared
+ * `commandTools` available — so a stranger DMing the bot can drive only the
+ * whitelisted CLIs, never bash / eval / MCP / file tools. Trusted senders
+ * (the operator) are completely unaffected and keep the full tool set.
+ *
+ * Absent = feature off: everyone gets the normal full tool set (back-compat).
+ */
+export interface GuestToolPolicy {
+  /** Senders exempt from the sandbox (full tools). Falls back to `access.admins` when unset. */
+  unrestrictedUsers?: string[];
+  /** CLIs exposed to guests as host tools (their only execution surface). */
+  commandTools?: CommandToolConfig[];
+  /** Extra builtin tool names guests may also call (e.g. "read"). Default: none. */
+  extraToolAllowlist?: string[];
+  /** Expose the Feishu host tools (send/reply/get message) to guests. Default false. */
+  feishuHostTools?: boolean;
+  /**
+   * System-prompt text appended (via `--append-system-prompt`) for guest runs
+   * only — gives the sandboxed agent its role/instructions without affecting
+   * trusted users. Empty/unset = no append.
+   */
+  systemPrompt?: string;
+}
+
 export interface AppPreferences {
   /** OMP executable name or path. Default: omp. */
   ompBinary?: string;
@@ -148,6 +203,8 @@ export interface AppPreferences {
   requireMentionInGroup?: boolean;
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
+  /** Per-sender tool sandbox for non-trusted senders. See GuestToolPolicy. */
+  guestPolicy?: GuestToolPolicy;
   /**
    * Grace period (ms) between SIGTERM and SIGKILL when killing the OMP
    * subprocess. Bumped from a hardcoded 500ms because agents often have
@@ -314,4 +371,101 @@ export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
   const clamped = Math.min(Math.max(Math.floor(raw), 1), 120);
   return clamped * 60_000;
+}
+
+/**
+ * The guest sandbox policy, or undefined when the feature is off. When
+ * present, senders not on the trusted list run OMP in a hard-allowlisted
+ * sandbox (see GuestToolPolicy).
+ */
+export function getGuestPolicy(cfg: AppConfig): GuestToolPolicy | undefined {
+  const p = cfg.preferences?.guestPolicy;
+  return p && typeof p === 'object' ? p : undefined;
+}
+
+/**
+ * True when `senderId` is NOT sandboxed: either the feature is off, or the
+ * sender is on the trusted exemption list. Trusted list falls back to
+ * `access.admins` when `unrestrictedUsers` is unset. When a policy is present
+ * but no trusted list resolves, nobody is exempt (fail-safe: lock rather than
+ * silently exempt everyone). Equivalently, `!isUnrestrictedUser(...)` means
+ * "apply the guest sandbox to this sender".
+ */
+export function isUnrestrictedUser(cfg: AppConfig, senderId: string): boolean {
+  const policy = getGuestPolicy(cfg);
+  if (!policy) return true;
+  const list = policy.unrestrictedUsers ?? cfg.preferences?.access?.admins;
+  if (!list || list.length === 0) return false;
+  return list.includes(senderId);
+}
+
+const TOOL_NAME_RE = /^[a-zA-Z0-9_]+$/;
+
+function toStringArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const arr = v.filter((x): x is string => typeof x === 'string');
+  return arr.length > 0 ? arr : undefined;
+}
+
+function clampInt(v: unknown, def: number, lo: number, hi: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return def;
+  return Math.min(hi, Math.max(lo, Math.floor(v)));
+}
+
+/**
+ * Validated guest command-tool configs: drops entries with an invalid name
+ * (must match /^[a-zA-Z0-9_]+$/) or empty command, dedupes by name, and
+ * fills timeout/output defaults.
+ */
+export function getGuestCommandTools(cfg: AppConfig): CommandToolConfig[] {
+  const raw: unknown = getGuestPolicy(cfg)?.commandTools;
+  if (!Array.isArray(raw)) return [];
+  const out: CommandToolConfig[] = [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    const name = typeof e.name === 'string' ? e.name.trim() : '';
+    const command = typeof e.command === 'string' ? e.command.trim() : '';
+    if (!TOOL_NAME_RE.test(name) || command === '' || seen.has(name)) continue;
+    seen.add(name);
+    out.push({
+      name,
+      command,
+      args: toStringArray(e.args),
+      appendArgs: toStringArray(e.appendArgs),
+      allowedSubcommands: toStringArray(e.allowedSubcommands),
+      description: typeof e.description === 'string' && e.description.trim() !== '' ? e.description.trim() : undefined,
+      cwd: typeof e.cwd === 'string' && e.cwd.trim() !== '' ? e.cwd.trim() : undefined,
+      timeoutMs: clampInt(e.timeoutMs, 120_000, 1000, 600_000),
+      maxOutputBytes: clampInt(e.maxOutputBytes, 30_000, 1000, 200_000),
+    });
+  }
+  return out;
+}
+
+/**
+ * The hard allowlist of tool names a guest may call: command-tool names plus
+ * any `extraToolAllowlist` entries (deduped). Enforced by the guest hook.
+ */
+export function getGuestToolAllowlist(cfg: AppConfig): string[] {
+  const policy = getGuestPolicy(cfg);
+  if (!policy) return [];
+  const names = getGuestCommandTools(cfg).map((t) => t.name);
+  const extra = Array.isArray(policy.extraToolAllowlist)
+    ? policy.extraToolAllowlist.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())
+    : [];
+  return [...new Set([...names, ...extra])];
+}
+
+/** Whether guests may use the Feishu host tools. Default false. */
+export function getGuestFeishuHostTools(cfg: AppConfig): boolean {
+  return getGuestPolicy(cfg)?.feishuHostTools === true;
+}
+
+/** Guest-only system prompt to append, or undefined when unset/blank. */
+export function getGuestSystemPrompt(cfg: AppConfig): string | undefined {
+  const raw = getGuestPolicy(cfg)?.systemPrompt;
+  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+  return raw;
 }

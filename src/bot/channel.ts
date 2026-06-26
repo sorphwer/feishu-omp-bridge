@@ -23,6 +23,10 @@ import { tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
 import {
   getAgentStopGraceMs,
+  getGuestCommandTools,
+  getGuestFeishuHostTools,
+  getGuestPolicy,
+  getGuestSystemPrompt,
   getOmpModel,
   getMaxConcurrentRuns,
   getMessageReplyMode,
@@ -30,6 +34,7 @@ import {
   getRunIdleTimeoutMs,
   getShowToolCalls,
   isChatAllowed,
+  isUnrestrictedUser,
   isUserAllowed,
 } from '../config/schema';
 import { resolveAppSecret } from '../config/secret-resolver';
@@ -40,6 +45,8 @@ import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { handleCommentMention } from './comments';
+import { buildCommandTools } from './command-tools';
+import { buildGuestRunArgs, type GuestRunArgs } from './guest-lockdown';
 import { createFeishuHostIntegration } from './feishu-host';
 import { expandInteractiveCard } from './interactive-card';
 import { startKeepalive } from './keepalive';
@@ -561,15 +568,59 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cwd,
   });
 
+  // Tool sandbox scope:
+  //   • Groups / topics: ALWAYS sandboxed — even the operator. Group chats are
+  //     shared spaces, so the bot is always the locked "guest" persona there.
+  //   • DMs (p2p): trust-based — the operator gets full tools, everyone else is
+  //     sandboxed.
+  // Gated on guestPolicy being configured; fail-closed on missing senderId.
+  const policyActive = getGuestPolicy(controls.cfg) !== undefined;
+  const isP2p = firstMsg.chatType === 'p2p';
+  const allTrusted = batch.every((m) => Boolean(m.senderId) && isUnrestrictedUser(controls.cfg, m.senderId));
+  const sandboxGuest = policyActive && !(isP2p && allTrusted);
+
+  let guestArgs: GuestRunArgs | undefined;
+  let hostTools = feishuHost.tools;
+  let hostUriSchemes = feishuHost.uriSchemes;
+  let runPrompt = prompt;
+  if (sandboxGuest) {
+    guestArgs = await buildGuestRunArgs(controls.cfg);
+    const guestFeishuTools = getGuestFeishuHostTools(controls.cfg);
+    const commandTools = buildCommandTools(getGuestCommandTools(controls.cfg), cwd);
+    hostTools = guestFeishuTools ? [...feishuHost.tools, ...commandTools] : commandTools;
+    // The feishu:// scheme can read arbitrary messages by id — drop it for
+    // guests unless feishu host tools are explicitly allowed.
+    hostUriSchemes = guestFeishuTools ? feishuHost.uriSchemes : [];
+    // Guest system prompt is PREPENDED to the user prompt (same proven path as
+    // OMP_BRIDGE_PROMPT). NOT via `--append-system-prompt`: appending an extra
+    // system block destabilizes the codex (gpt-5.5) request and intermittently
+    // hangs the run with no output — observed as "guest gets no reply".
+    const guestPrompt = getGuestSystemPrompt(controls.cfg);
+    if (guestPrompt) runPrompt = `${guestPrompt}\n\n---\n\n${prompt}`;
+    const guestSender = batch.find((m) => !Boolean(m.senderId) || !isUnrestrictedUser(controls.cfg, m.senderId));
+    const logSender = guestSender?.senderId ?? firstMsg.senderId ?? '';
+    log.info('guest', 'sandboxed-run', {
+      scope,
+      chatType: firstMsg.chatType,
+      sender: logSender ? logSender.slice(-6) : '(unknown)',
+      tools: guestArgs.tools,
+      hostToolCount: hostTools.length,
+      systemPrompt: Boolean(guestPrompt),
+    });
+  }
+
   const run = agent.run({
-    prompt,
+    prompt: runPrompt,
     sessionId: resumeFrom,
     cwd,
     model: getOmpModel(controls.cfg),
     imagePaths,
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
-    hostTools: feishuHost.tools,
-    hostUriSchemes: feishuHost.uriSchemes,
+    hostTools,
+    hostUriSchemes,
+    tools: guestArgs?.tools,
+    configOverlayPaths: guestArgs?.configOverlayPaths,
+    extensionPaths: guestArgs?.extensionPaths,
   });
   const handle = activeRuns.register(scope, run);
 

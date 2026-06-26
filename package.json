@@ -24,6 +24,7 @@
     "build": "tsup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:guest": "bun scripts/test-guest.ts",
     "prepublishOnly": "pnpm typecheck && pnpm build"
   },
   "dependencies": {
@@ -41,7 +42,7 @@
     "vitest": "^2.1.8"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

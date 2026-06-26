@@ -86,6 +86,12 @@ export interface AgentRunOptions {
   sessionId?: string;
   model?: string;
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
+  /** Per-run OMP tool allowlist (`--tools`); overrides the adapter default. */
+  tools?: string;
+  /** Per-run OMP config overlay file paths (`--config`), applied in order. */
+  configOverlayPaths?: string[];
+  /** Per-run OMP extension/hook file paths (`--extension`). */
+  extensionPaths?: string[];
   /** Local image paths to pass to agents that support native image flags. */
   imagePaths?: string[];
   /**
