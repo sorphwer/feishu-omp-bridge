@@ -2,7 +2,7 @@ import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { OmpAdapter } from './adapter';
+import { OmpAdapter, isSessionMissingError } from './adapter';
 import type { AgentEvent } from '../types';
 
 async function fakeOmp(source: string): Promise<string> {
@@ -156,5 +156,35 @@ process.exit(7);
     await expect(collect(run.events)).resolves.toEqual([
       { type: 'error', message: 'omp exited with code 7: auth required' },
     ]);
+  });
+  it('still emits a terminal error when the stdout pipe lingers after exit', async () => {
+    // Reproduce the fast-startup-failure hang: omp exits non-zero but a
+    // grandchild keeps the inherited stdout fd open, so the parent's stdout
+    // never EOFs. Without the exit-drain safety net the event stream would
+    // hang until the idle watchdog (minutes); the test would time out.
+    const binary = await fakeOmp(`
+import { spawn } from 'node:child_process';
+const gc = spawn(process.execPath, ['-e', 'setTimeout(function(){}, 10000)'], { stdio: ['ignore', 'inherit', 'ignore'], detached: true });
+gc.unref();
+console.error('Error: Session "x" not found.');
+process.exit(1);
+`);
+
+    const run = new OmpAdapter({ binary }).run({ prompt: 'ping', cwd: tmpdir() });
+    const events = await collect(run.events);
+    expect(events).toEqual([{ type: 'error', message: expect.stringContaining('not found') }]);
+  });
+});
+
+describe('isSessionMissingError', () => {
+  it('matches omp resume-miss aborts', () => {
+    expect(isSessionMissingError('omp exited with code 1: Error: Session "019f-131f" not found.')).toBe(true);
+    expect(isSessionMissingError('Session not found')).toBe(true);
+  });
+
+  it('ignores unrelated errors and empty input', () => {
+    expect(isSessionMissingError('omp exited with code 1: No API key found for anthropic')).toBe(false);
+    expect(isSessionMissingError('file not found')).toBe(false);
+    expect(isSessionMissingError(undefined)).toBe(false);
   });
 });
