@@ -3,7 +3,7 @@ import type {
   CommentEvent,
   NormalizedMessage,
 } from '@larksuiteoapi/node-sdk';
-import type { AppConfig } from '../config/schema';
+import type { AppConfig, PolicyScenario } from '../config/schema';
 import { relayRunTarget } from '../config/policy';
 import { log } from '../core/logger';
 import { naturalId, RELAY_PROTOCOL_VERSION, type RelayEvent, type RelayKind } from './protocol';
@@ -34,7 +34,7 @@ export interface RelaySink {
  */
 export interface RelayRouter {
   routeMessage(msg: NormalizedMessage): boolean;
-  routeCardAction(evt: CardActionEvent): boolean;
+  routeCardAction(evt: CardActionEvent): Promise<boolean>;
   routeComment(evt: CommentEvent): boolean;
 }
 
@@ -42,6 +42,13 @@ export interface RelayRouterOptions {
   cfg: AppConfig;
   sink: RelaySink;
   now?: () => number;
+  /**
+   * Resolve a chat's scenario (p2p / group / topic) for card-action routing —
+   * the event itself carries no chat type. Backed by the bridge's ChatModeCache
+   * (mostly cached). Omitted in tests / when scenario gating is irrelevant, in
+   * which case a restricted principal's card actions stay on the front.
+   */
+  resolveScenario?: (chatId: string) => Promise<PolicyScenario>;
 }
 
 export function createRelayRouter(opts: RelayRouterOptions): RelayRouter {
@@ -68,15 +75,19 @@ export function createRelayRouter(opts: RelayRouterOptions): RelayRouter {
 
   return {
     routeMessage(msg) {
-      if (relayRunTarget(cfg, msg.senderId) !== 'worker') return false;
+      const scenario: PolicyScenario = msg.chatType === 'p2p' ? 'p2p' : 'group';
+      if (relayRunTarget(cfg, msg.senderId, scenario) !== 'worker') return false;
       return dispatch('message', msg.chatId, msg);
     },
-    routeCardAction(evt) {
-      if (relayRunTarget(cfg, evt.operator.openId) !== 'worker') return false;
+    async routeCardAction(evt) {
+      const scenario = await opts.resolveScenario?.(evt.chatId);
+      if (relayRunTarget(cfg, evt.operator.openId, scenario) !== 'worker') return false;
       return dispatch('cardAction', evt.chatId, evt);
     },
     routeComment(evt) {
-      if (relayRunTarget(cfg, evt.operator.openId) !== 'worker') return false;
+      // Doc comments have no chat scenario; pass undefined so an explicit
+      // relayScenarios restriction keeps them on the front.
+      if (relayRunTarget(cfg, evt.operator.openId, undefined) !== 'worker') return false;
       return dispatch('comment', evt.fileToken, evt);
     },
   };

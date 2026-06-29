@@ -303,6 +303,15 @@ export interface PrincipalConfig {
    * unlisted) is always `front` — strangers are never relayed to a worker.
    */
   run?: PolicyRunTarget;
+  /**
+   * When `run === 'worker'`, restrict WHICH chat scenarios relay to the worker
+   * (default: all). e.g. `['p2p']` sends only this principal's private chats to
+   * the worker (a personal laptop) while their group/topic activity stays on the
+   * always-on front. A `'group'` entry also matches `'topic'`. Card actions and
+   * comments resolve through the same gate, so callbacks stay on the side that
+   * rendered the card. Ignored when `run` is `front`.
+   */
+  relayScenarios?: PolicyScenario[];
 }
 
 export type PrincipalInput = string[] | PrincipalConfig;

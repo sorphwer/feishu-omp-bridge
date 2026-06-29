@@ -184,6 +184,9 @@ export interface BridgeRuntime {
   dispatchMessage(msg: NormalizedMessage): Promise<void>;
   dispatchCardAction(evt: CardActionEvent): Promise<void>;
   dispatchComment(evt: CommentEvent): Promise<void>;
+  /** Shared chat-mode cache (p2p/group/topic). Reused by the relay router to
+   * resolve a card action's scenario for per-principal `relayScenarios`. */
+  readonly chatModeCache: ChatModeCache;
   /** Stop runs + flush stores. Does NOT touch the channel itself. */
   shutdown(): Promise<void>;
 }
@@ -245,6 +248,7 @@ export function createBridgeRuntime(deps: BridgeRuntimeDeps): BridgeRuntime {
   });
 
   return {
+    chatModeCache,
     dispatchMessage: (msg) =>
       intakeMessage({
         channel,
@@ -303,7 +307,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       secret: await resolveRelaySecret(cfg, appSecret),
       listen: relay.listen ?? '127.0.0.1:8787',
     });
-    router = createRelayRouter({ cfg, sink: relayServer });
+    router = createRelayRouter({
+      cfg,
+      sink: relayServer,
+      resolveScenario: (chatId) => runtime.chatModeCache.resolve(channel, chatId),
+    });
     log.info('relay', 'front-ready', { address: relayServer.address });
     console.log(`relay front 已监听 ${relayServer.address}（worker 拨入此地址）\n`);
   }
@@ -325,7 +333,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     },
     cardAction: async (evt) => {
       await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
-        if (router?.routeCardAction(evt)) return;
+        if (await router?.routeCardAction(evt)) return;
         await runtime.dispatchCardAction(evt);
       }).catch((err) => log.fail('cardAction', err));
     },

@@ -118,12 +118,32 @@ function resolveExtensionPaths(v: unknown): string[] {
   });
 }
 
+const VALID_SCENARIOS: PolicyScenario[] = ['p2p', 'group', 'topic'];
+
+/** Filtered scenario list, or `undefined` when the field is absent (= no
+ * restriction). An explicit array that filters down to empty stays `[]`
+ * (relay nothing) — distinct from absent. */
+function normalizeScenarios(v: unknown): PolicyScenario[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  return [...new Set(v.filter((s): s is PolicyScenario => VALID_SCENARIOS.includes(s as PolicyScenario)))];
+}
+
+/** True when `scenario` is covered by an `allowed` relay-scenario list. A
+ * `group` allowance also covers `topic`. An unknown scenario (e.g. a doc
+ * comment) never satisfies an explicit restriction. */
+function scenarioMatches(allowed: PolicyScenario[], scenario: PolicyScenario | undefined): boolean {
+  if (!scenario) return false;
+  if (allowed.includes(scenario)) return true;
+  return scenario === 'topic' && allowed.includes('group');
+}
+
 /** Coerce the shorthand (`string[]`) or full principal form to `PrincipalConfig`. */
 export function normalizePrincipal(input: PrincipalInput | undefined): PrincipalConfig {
   if (Array.isArray(input)) return { users: cleanList(input), run: 'front' };
   const users = cleanList(input?.users);
   const run: PolicyRunTarget = input?.run === 'worker' ? 'worker' : 'front';
-  return { users, run };
+  const relayScenarios = normalizeScenarios(input?.relayScenarios);
+  return relayScenarios !== undefined ? { users, run, relayScenarios } : { users, run };
 }
 
 /** The principal name a sender belongs to, or `guest`. */
@@ -233,10 +253,24 @@ export function resolvePolicy(cfg: AppConfig, ctx: PolicyContext): ResolvedPolic
   return { principal, run, profile: LOCKED_PROFILE, ruleIndex: -1 };
 }
 
-/** Where a sender's runs execute (front/worker). Consulted by the relay router. */
-export function relayRunTarget(cfg: AppConfig, senderId: string | undefined): PolicyRunTarget {
+/**
+ * Where a sender's runs execute (front/worker). Consulted by the relay router.
+ * `scenario` (the chat type of the triggering event) gates per-principal
+ * `relayScenarios`: a worker-bound principal only relays the scenarios it lists
+ * (default: all). An unknown scenario (e.g. a doc comment) never satisfies an
+ * explicit restriction, so it stays on the front.
+ */
+export function relayRunTarget(
+  cfg: AppConfig,
+  senderId: string | undefined,
+  scenario?: PolicyScenario,
+): PolicyRunTarget {
   const policy = effectivePolicy(cfg);
-  return runTargetForPrincipal(policy, principalOf(policy, senderId));
+  const principal = principalOf(policy, senderId);
+  if (runTargetForPrincipal(policy, principal) !== 'worker') return 'front';
+  const { relayScenarios } = normalizePrincipal(policy.principals?.[principal]);
+  if (relayScenarios && !scenarioMatches(relayScenarios, scenario)) return 'front';
+  return 'worker';
 }
 
 function rank(p: ResolvedProfile): number {
