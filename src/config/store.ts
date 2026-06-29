@@ -1,7 +1,7 @@
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { paths } from './paths';
-import type { AppConfig, AppPreferences, TenantBrand } from './schema';
+import type { AppConfig, TenantBrand } from './schema';
 import { secretKeyForApp } from './schema';
 
 export async function loadConfig(path: string = paths.configFile): Promise<Partial<AppConfig>> {
@@ -23,8 +23,9 @@ export async function loadConfig(path: string = paths.configFile): Promise<Parti
 /**
  * Build an AppConfig that points the app's secret at the encrypted local
  * keystore via an exec-provider SecretRef. Used by /account change and the
- * first-run migration path. Preserves the existing `preferences` block so
- * users don't lose unrelated settings on credential update.
+ * first-run migration path. `prior` (the existing config) is spread through so
+ * non-credential top-level sections — `preferences`, `relay`, future `mcp`, … —
+ * survive the rewrite; only `accounts` and `secrets` are rebuilt below.
  *
  * The provider command is a thin shell wrapper bridge writes under
  * `~/.feishu-omp-bridge/secrets-getter` (always user-owned, never a symlink) so
@@ -37,10 +38,14 @@ export async function loadConfig(path: string = paths.configFile): Promise<Parti
 export async function buildEncryptedAccountConfig(
   appId: string,
   tenant: TenantBrand,
-  preferences?: AppPreferences,
+  prior?: Partial<AppConfig>,
 ): Promise<AppConfig> {
   const wrapperPath = await ensureSecretsGetterWrapper();
   return {
+    // Carry over every other top-level section verbatim; accounts + secrets
+    // are rebuilt below to point at the encrypted keystore (any plaintext
+    // secret or stale provider in `prior` is overwritten, not preserved).
+    ...prior,
     accounts: {
       app: {
         id: appId,
@@ -62,7 +67,6 @@ export async function buildEncryptedAccountConfig(
         },
       },
     },
-    ...(preferences ? { preferences } : {}),
   };
 }
 

@@ -327,6 +327,68 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
 - 生成的沙箱产物在 `~/.feishu-omp-bridge/guest/`(overlay + 白名单 hook,自动维护)。
 - 本地回归验证:`pnpm test:guest`(加 `--model` 跑真实模型越权测试)。
 
+## 中继 / Relay（多机分流）
+
+一个飞书 app 的事件只能投递给单一入口,无法让飞书自己按发送者把"你"投到本地、"别人"投到服务器。relay 解决这个:一台 **front**(常开服务器)持有唯一的飞书长连接,按发送者把信任用户的事件**中继**给一台 **worker**(如你的笔记本);worker 不连飞书事件流,只跑 OMP 并用同一个 app 凭据**自己回写飞书**。其余人留在 front(走访客沙箱)。
+
+```text
+你私聊 ─┐                      ┌─ 信任用户 → 中继 → [worker: 你的笔记本] → 跑 omp、直接回飞书
+别人私聊 ┴→ 飞书 ─长连接→ [front] ┤
+                                └─ 其他人 → front 本地沙箱
+```
+
+- **传输**:worker 反向拨入 front 的 HTTP/SSE 端点(穿 NAT,笔记本无需公网入站)。
+- **鉴权**:默认无需额外密钥——两端共用同一个 App Secret,握手用从它派生的 HMAC 签名(secret 本身永不上线)。需要独立轮换/吊销时可设 `relay.secret`(见下)。
+- **安全边界 = TLS**:HMAC 握手只认证 worker 身份;事件流的机密性与完整性由 TLS 提供。`endpoint` 用明文 `http://`(非 loopback)时启动会告警——主动中间人可读取/伪造事件,而事件会驱动你本地的全工具 agent,务必用 `https://`(服务器侧 TLS 反代即可)。
+- **掉线兜底**:worker 不在线时,front 在本地处理信任用户的消息(降级,不丢消息)。
+
+### front 配置(服务器)
+
+```json
+{
+  "relay": {
+    "role": "front",
+    "listen": "127.0.0.1:8787"
+  }
+}
+```
+
+- `listen` 可省略,默认 `127.0.0.1:8787`。建议用 TLS 反代(nginx/caddy)对外暴露;直接暴露也行,HMAC 握手是访问闸门。
+- 中继名单沿用现有信任配置:`relay.route.users` 显式指定 → 否则非空的 `guestPolicy.unrestrictedUsers` → 否则非空的 `access.admins`。**全空 = 谁都不中继**(fail-safe:绝不会把陌生人转到你的笔记本)。
+
+### worker 配置(笔记本)
+
+```json
+{
+  "relay": {
+    "role": "worker",
+    "endpoint": "https://your-server.example"
+  }
+}
+```
+
+- `endpoint` 是 worker 唯一必填项:front 的对外地址(scheme 由你定,反代后用 `https://`)。
+- worker 与 front **共用同一个 app**(同 `accounts.app` + 同 App Secret)。worker **不开飞书长连接**,因此不会触发同 app 的"随机派发"冲突,`ps` 里标记为 `worker`。
+- `workerId` 可选,默认机器 hostname(仅用于日志/多 worker 区分)。
+
+### 认证密钥(可选 `relay.secret`)
+
+默认两端都从 App Secret 派生 relay HMAC 密钥,**零配置**。想把"能连 relay"与"能以 bot 身份调飞书 API"解耦(独立轮换/吊销、缩小泄漏影响面)时,在 **front 和 worker 同时**设 `relay.secret`:
+
+```json
+{ "relay": { "role": "front", "secret": "${RELAY_SECRET}" } }
+```
+
+- 支持与 App Secret 相同的形式:明文 / `${ENV}` 模板 / keystore SecretRef(不落明文)。
+- **两端必须一致**(都设成同一个值,或都不设)。不一致 → 握手签名对不上,worker 反复 401、front 日志 `auth-reject reason=bad signature`。
+- 想踢掉所有 worker:改 `relay.secret` 重启 front 即可,**飞书凭据不动**。
+
+### 路由与边界
+
+- 路由纯按**发送者/操作者信任**判定:信任用户的消息、卡片点击、文档评论都中继到 worker;非信任者一律留在 front。
+- 私聊场景(你私聊 bot)完全正确。已知边界:群里非信任成员点击信任用户那条 worker 渲染卡片的按钮,会落到 front 而非 worker(罕见、非安全问题)。
+- `relay` 与 `preferences`、未来的顶层段一样,会在 `/account` 切换和首次密钥迁移时被保留,不会丢失。
+
 ## 数据目录
 
 | 路径 | 用途 |

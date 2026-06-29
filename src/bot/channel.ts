@@ -1,5 +1,7 @@
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import type {
+  CardActionEvent,
+  CommentEvent,
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
@@ -32,12 +34,13 @@ import {
   getMessageReplyMode,
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
+  getRelayConfig,
   getShowToolCalls,
   isChatAllowed,
   isUnrestrictedUser,
   isUserAllowed,
 } from '../config/schema';
-import { resolveAppSecret } from '../config/secret-resolver';
+import { resolveAppSecret, resolveRelaySecret } from '../config/secret-resolver';
 import { log, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
 import type { SessionStore } from '../session/store';
@@ -50,11 +53,14 @@ import { buildGuestRunArgs, type GuestRunArgs } from './guest-lockdown';
 import { createFeishuHostIntegration } from './feishu-host';
 import { expandInteractiveCard } from './interactive-card';
 import { startKeepalive } from './keepalive';
-import { configureNetwork } from './network-config';
+import { configureNetwork, type NetworkOverrides } from './network-config';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, renderQuotedBlock, type QuotedContext } from './quote';
 import { addWorkingReaction, removeReaction } from './reaction';
+import { startRelayServer, type RelayServerHandle } from '../relay/front';
+import { createRelayRouter, type RelayRouter } from '../relay/route';
+import { startRelayWorker } from '../relay/worker';
 
 const DEBOUNCE_MS = 600;
 
@@ -128,27 +134,14 @@ export interface StartChannelDeps {
   controls: Controls;
 }
 
-export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
-  const { cfg, agent, sessions, workspaces, controls } = deps;
-  const activeRuns = new ActiveRuns();
-  // ChatModeCache stays per-bridge-instance — invalidated on restart along
-  // with everything else. Topic-mode chats only need one chat.get() call ever.
-  const chatModeCache = new ChatModeCache();
-  // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
-  // so /config bumps take effect for the next run.
-  const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
-
-  // Apply network-layer overrides (HTTP timeout + proxy from env). Idempotent;
-  // safe to call on every startChannel (used by /account change hot-reload too).
-  const netOverrides = configureNetwork();
-
-  // Resolve the App Secret to plaintext. The config field can be a literal
-  // string, a "${VAR}" template, or a {source, id} SecretRef referencing
-  // the encrypted keystore / env / file / exec provider. Re-resolved on
-  // every startChannel so /account change picks up new secrets.
-  const appSecret = await resolveAppSecret(cfg);
-
-  const opts: LarkChannelOptions = {
+/** Shared LarkChannel options. `appSecret` is pre-resolved; `transport` is
+ * added by callers (worker uses `'none'` to stay outbound-only). */
+function buildChannelOptions(
+  cfg: AppConfig,
+  appSecret: string,
+  netOverrides: NetworkOverrides,
+): LarkChannelOptions {
+  return {
     appId: cfg.accounts.app.id,
     appSecret,
     domain: cfg.accounts.app.tenant === 'lark' ? Domain.Lark : Domain.Feishu,
@@ -183,8 +176,39 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     // Optional WS-layer proxy agent (only when HTTPS_PROXY / HTTP_PROXY env set).
     ...(netOverrides.agent ? { agent: netOverrides.agent } : {}),
   };
+}
 
-  const channel = createLarkChannel(opts);
+/**
+ * The per-instance message pipeline bound to one channel: intake → debounce →
+ * run, plus card-action and comment handling. Both the front (driven by the
+ * Feishu WS) and a worker (driven by relayed events) build one of these and
+ * feed it events through the same three `dispatch*` entry points.
+ */
+export interface BridgeRuntime {
+  dispatchMessage(msg: NormalizedMessage): Promise<void>;
+  dispatchCardAction(evt: CardActionEvent): Promise<void>;
+  dispatchComment(evt: CommentEvent): Promise<void>;
+  /** Stop runs + flush stores. Does NOT touch the channel itself. */
+  shutdown(): Promise<void>;
+}
+
+export interface BridgeRuntimeDeps {
+  channel: LarkChannel;
+  agent: AgentAdapter;
+  sessions: SessionStore;
+  workspaces: WorkspaceStore;
+  controls: Controls;
+}
+
+export function createBridgeRuntime(deps: BridgeRuntimeDeps): BridgeRuntime {
+  const { channel, agent, sessions, workspaces, controls } = deps;
+  const activeRuns = new ActiveRuns();
+  // ChatModeCache stays per-bridge-instance — invalidated on restart along
+  // with everything else. Topic-mode chats only need one chat.get() call ever.
+  const chatModeCache = new ChatModeCache();
+  // Concurrency cap — reads `preferences.maxConcurrentRuns` on each acquire,
+  // so /config bumps take effect for the next run.
+  const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const media = new MediaCache(channel);
 
   // Pending → run handoff: while a run is active on a chat, block its pending
@@ -224,49 +248,95 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     });
   });
 
+  return {
+    dispatchMessage: (msg) =>
+      intakeMessage({
+        channel,
+        agent,
+        sessions,
+        workspaces,
+        activeRuns,
+        media,
+        pending,
+        msg,
+        controls,
+        chatModeCache,
+      }),
+    dispatchCardAction: (evt) =>
+      handleCardAction({
+        channel,
+        evt,
+        sessions,
+        workspaces,
+        activeRuns,
+        agent,
+        controls,
+        pending,
+        chatModeCache,
+      }),
+    dispatchComment: (evt) => handleCommentMention({ channel, evt, agent, sessions, workspaces }),
+    shutdown: async () => {
+      pending.cancelAll();
+      await activeRuns.stopAll();
+      await Promise.allSettled([sessions.flush(), workspaces.flush()]);
+    },
+  };
+}
+
+export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
+  const { cfg, agent, sessions, workspaces, controls } = deps;
+
+  // Apply network-layer overrides (HTTP timeout + proxy from env). Idempotent;
+  // safe to call on every startChannel (used by /account change hot-reload too).
+  const netOverrides = configureNetwork();
+  // Resolve the App Secret to plaintext. Re-resolved on every startChannel so
+  // /account change picks up new secrets. Also the relay HMAC key seed.
+  const appSecret = await resolveAppSecret(cfg);
+
+  const channel = createLarkChannel(buildChannelOptions(cfg, appSecret, netOverrides));
+  const runtime = createBridgeRuntime({ channel, agent, sessions, workspaces, controls });
+
+  // Front relay: forward trusted senders to a connected worker; everyone else
+  // (and trusted senders when no worker is online) runs locally on the front.
+  const relay = getRelayConfig(cfg);
+  let relayServer: RelayServerHandle | undefined;
+  let router: RelayRouter | undefined;
+  if (relay?.role === 'front') {
+    relayServer = await startRelayServer({
+      appId: cfg.accounts.app.id,
+      secret: await resolveRelaySecret(cfg, appSecret),
+      listen: relay.listen ?? '127.0.0.1:8787',
+    });
+    router = createRelayRouter({ cfg, sink: relayServer });
+    log.info('relay', 'front-ready', { address: relayServer.address });
+    console.log(`relay front 已监听 ${relayServer.address}（worker 拨入此地址）\n`);
+  }
+
   // Counter for stdout reconnect escalation; reset on `reconnected`.
   let consecutiveReconnects = 0;
 
   channel.on({
     message: async (msg) => {
-      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, () =>
-        intakeMessage({
-          channel,
-          agent,
-          sessions,
-          workspaces,
-          activeRuns,
-          media,
-          pending,
-          msg,
-          controls,
-          chatModeCache,
-        }),
-      ).catch((err) => log.fail('intake', err));
+      await withTrace({ chatId: msg.chatId, msgId: msg.messageId }, async () => {
+        // Forwarding is non-blocking and returns immediately — the WS handler
+        // must ack fast or Feishu redelivers. The worker dedupes by event id.
+        if (router?.routeMessage(msg)) return;
+        await runtime.dispatchMessage(msg);
+      }).catch((err) => log.fail('intake', err));
     },
     reject: (evt) => {
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
       await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
-        await handleCardAction({
-          channel,
-          evt,
-          sessions,
-          workspaces,
-          activeRuns,
-          agent,
-          controls,
-          pending,
-          chatModeCache,
-        });
+        if (router?.routeCardAction(evt)) return;
+        await runtime.dispatchCardAction(evt);
       }).catch((err) => log.fail('cardAction', err));
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {
-        await handleCommentMention({ channel, evt, agent, sessions, workspaces }).catch((err) =>
-          log.fail('comment', err),
-        );
+        if (router?.routeComment(evt)) return;
+        await runtime.dispatchComment(evt);
       }).catch((err) => log.fail('comment', err));
     },
     reconnecting: () => {
@@ -332,12 +402,100 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     channel,
     disconnect: async () => {
       keepalive.stop();
-      pending.cancelAll();
+      await relayServer?.close();
       await channel.disconnect();
-      await activeRuns.stopAll();
-      await Promise.allSettled([sessions.flush(), workspaces.flush()]);
+      await runtime.shutdown();
     },
   };
+}
+
+/**
+ * Worker mode: do NOT open the Feishu WS (a 2nd long-connection on the same
+ * app makes delivery random). Build an outbound-only channel — `transport:
+ * 'webhook'` tells the SDK not to open the WebSocket long-connection, so
+ * connect() only fetches the bot identity over REST — then drive the pipeline
+ * from events relayed by a front. (We never actually receive webhooks; events
+ * arrive via the relay client.)
+ */
+export async function startWorker(deps: StartChannelDeps): Promise<BridgeChannel> {
+  const { cfg, agent, sessions, workspaces, controls } = deps;
+  const relay = getRelayConfig(cfg);
+  if (relay?.role !== 'worker' || !relay.endpoint) {
+    throw new Error('worker mode requires relay.role "worker" and relay.endpoint');
+  }
+
+  const netOverrides = configureNetwork();
+  const appSecret = await resolveAppSecret(cfg);
+  const opts: LarkChannelOptions = {
+    ...buildChannelOptions(cfg, appSecret, netOverrides),
+    transport: 'webhook',
+  };
+  const channel = createLarkChannel(opts);
+  try {
+    // Identity bootstrap only — under transport:'webhook' connect() is a single
+    // REST call (/open-apis/bot/v3/info), no WebSocket. Best-effort: outbound
+    // still works without it (only quote bot-detection degrades).
+    await channel.connect();
+  } catch (err) {
+    log.warn('relay', 'identity-bootstrap-failed', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const runtime = createBridgeRuntime({ channel, agent, sessions, workspaces, controls });
+  const workerId = relay.workerId ?? hostname();
+  // Plain non-loopback HTTP: the HMAC handshake authenticates the worker, but
+  // the event stream itself is unencrypted and unauthenticated — an active MITM
+  // can read or forge events (which drive the local full-tool agent). Use https
+  // (TLS) for the relay endpoint, or add per-frame MACs.
+  if (/^http:\/\//i.test(relay.endpoint) && !/^http:\/\/(localhost|127\.|\[::1\])/i.test(relay.endpoint)) {
+    log.warn('relay', 'insecure-endpoint', { endpoint: relay.endpoint });
+    console.warn(
+      `⚠️ relay.endpoint 是明文 http(${relay.endpoint}):握手 HMAC 只认证 worker,事件流未加密、可被中间人读取/伪造。请改用 https。`,
+    );
+  }
+  const worker = startRelayWorker({
+    appId: cfg.accounts.app.id,
+    secret: await resolveRelaySecret(cfg, appSecret),
+    endpoint: relay.endpoint,
+    workerId,
+    onEvent: (event) => {
+      void withTrace({ chatId: `relay:${event.kind}`, msgId: event.id }, async () => {
+        if (event.kind === 'message') {
+          await runtime.dispatchMessage(event.payload as NormalizedMessage);
+        } else if (event.kind === 'cardAction') {
+          await runtime.dispatchCardAction(event.payload as CardActionEvent);
+        } else if (event.kind === 'comment') {
+          await runtime.dispatchComment(event.payload as CommentEvent);
+        }
+      }).catch((err) => log.fail('relay', err, { phase: 'inject', id: event.id }));
+    },
+  });
+
+  log.info('relay', 'worker-mode', {
+    endpoint: relay.endpoint,
+    worker: workerId,
+    bot: channel.botIdentity?.name ?? 'unknown',
+    agent: `${agent.displayName} (${agent.id})`,
+    procId: controls.processId,
+  });
+  console.log(`worker 模式已启动，连接 ${relay.endpoint}。按 Ctrl+C 退出。\n`);
+
+  return {
+    channel,
+    disconnect: async () => {
+      await worker.close();
+      await channel.disconnect();
+      await runtime.shutdown();
+    },
+  };
+}
+
+/** Start the bridge in the role configured by `relay.role` (worker vs the
+ * default front/standalone WS bridge). Single entry point for runStart and
+ * the /account hot-restart. */
+export async function startBridge(deps: StartChannelDeps): Promise<BridgeChannel> {
+  return getRelayConfig(deps.cfg)?.role === 'worker' ? startWorker(deps) : startChannel(deps);
 }
 
 interface IntakeDeps {

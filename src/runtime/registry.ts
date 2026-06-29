@@ -6,6 +6,13 @@ import { paths } from '../config/paths';
 import type { TenantBrand } from '../config/schema';
 
 /**
+ * Bridge role for conflict detection. Only `front`/`standalone` open the
+ * Feishu WS long-connection; a `worker` shares the same app but never does, so
+ * it must not be flagged as a competing connection.
+ */
+export type ProcessRole = 'standalone' | 'front' | 'worker';
+
+/**
  * Tracks running `feishu-omp-bridge start` processes so we can:
  *   - Warn on duplicate `start` of the same app (open-platform routes events
  *     to one of N long-connections randomly, leaving users guessing).
@@ -32,6 +39,8 @@ export interface ProcessEntry {
    * WS handshake — undefined until the connection is up, or on processes
    * registered by older versions of the bridge. */
   botName?: string;
+  /** Bridge role. Absent on entries from older versions = treat as standalone. */
+  role?: ProcessRole;
 }
 
 interface RegistryFile {
@@ -114,6 +123,7 @@ export interface RegisterArgs {
   tenant: TenantBrand;
   configPath: string;
   version: string;
+  role?: ProcessRole;
 }
 
 /**
@@ -133,6 +143,7 @@ export async function register(args: RegisterArgs): Promise<ProcessEntry> {
     configPath: args.configPath,
     startedAt: new Date().toISOString(),
     version: args.version,
+    role: args.role ?? 'standalone',
   };
   await writeAtomic([...live, entry], paths.processesFile);
   return entry;
@@ -196,7 +207,12 @@ export function cleanupTmpFiles(): void {
  * the caller's own pid) so a process doesn't flag itself as a conflict.
  */
 export function sameAppOthers(appId: string, excludePid = process.pid): ProcessEntry[] {
-  return readAndPrune().filter((e) => e.appId === appId && e.pid !== excludePid);
+  // Only processes that open the Feishu WS long-connection actually conflict
+  // (events get randomly distributed across them). Workers never open the WS,
+  // so they can share the app freely.
+  return readAndPrune().filter(
+    (e) => e.appId === appId && e.pid !== excludePid && e.role !== 'worker',
+  );
 }
 
 /**

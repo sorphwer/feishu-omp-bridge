@@ -2,7 +2,7 @@ import dns from 'node:dns';
 import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
 import { OmpAdapter, setAuthenticatedProviders, setModelCatalog, setModelRoles } from '../../agent';
-import { startChannel, type BridgeChannel } from '../../bot/channel';
+import { startBridge, type BridgeChannel } from '../../bot/channel';
 import { runRegistrationWizard } from '../../bot/wizard';
 import type { Controls } from '../../commands';
 import { setSecret } from '../../config/keystore';
@@ -32,6 +32,7 @@ import {
   unregisterSync,
   updateEntry,
   type ProcessEntry,
+  type ProcessRole,
 } from '../../runtime/registry';
 import { SessionStore } from '../../session/store';
 import { WorkspaceStore } from '../../workspace/store';
@@ -125,12 +126,16 @@ export async function runStart(opts: StartOptions): Promise<void> {
   // Same-app conflict detection. Open-platform routes events to one of the
   // long-connections at random, so two `start` of the same app makes "who
   // answered me" unpredictable. Warn + interactive triage before connecting.
-  const conflicts = sameAppOthers(cfg.accounts.app.id);
-  if (conflicts.length > 0) {
-    const proceed = await resolveConflict(cfg, conflicts);
-    if (!proceed) {
-      console.log('已取消启动。');
-      process.exit(0);
+  // Workers never open a WS long-connection, so they're exempt.
+  const role: ProcessRole = cfg.relay?.role ?? 'standalone';
+  if (role !== 'worker') {
+    const conflicts = sameAppOthers(cfg.accounts.app.id);
+    if (conflicts.length > 0) {
+      const proceed = await resolveConflict(cfg, conflicts);
+      if (!proceed) {
+        console.log('已取消启动。');
+        process.exit(0);
+      }
     }
   }
 
@@ -142,6 +147,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     tenant: cfg.accounts.app.tenant,
     configPath,
     version: pkg.version,
+    role,
   });
   log.info('registry', 'registered', { id: entry.id, pid: process.pid });
 
@@ -189,7 +195,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
         // this ordering, a failed restart would tear down the only
         // keepalive in the process and the bot would never recover until
         // someone manually restarts it.
-        const next_bridge = await startChannel({
+        const next_bridge = await startBridge({
           cfg: next,
           agent,
           sessions,
@@ -221,7 +227,7 @@ export async function runStart(opts: StartOptions): Promise<void> {
     },
   };
 
-  bridge = await startChannel({ cfg, agent, sessions, workspaces, controls });
+  bridge = await startBridge({ cfg, agent, sessions, workspaces, controls });
 
   // Backfill the bot's display name into the registry once WS handshake is
   // done — future starts conflicting on this app can show it in the prompt
@@ -329,7 +335,7 @@ async function maybeMigratePlaintextSecret(
       const next = await buildEncryptedAccountConfig(
         cfg.accounts.app.id,
         cfg.accounts.app.tenant,
-        cfg.preferences,
+        cfg,
       );
       await setSecret(secretKeyForApp(cfg.accounts.app.id), s);
       await saveConfig(next, configPath);
@@ -360,7 +366,7 @@ async function maybeMigratePlaintextSecret(
       const next = await buildEncryptedAccountConfig(
         cfg.accounts.app.id,
         cfg.accounts.app.tenant,
-        cfg.preferences,
+        cfg,
       );
       await saveConfig(next, configPath);
       console.log('🔒 已把 secrets provider 切到 wrapper 形态');
@@ -393,7 +399,7 @@ async function persistEncrypted(cfg: AppConfig, configPath: string): Promise<App
   const next = await buildEncryptedAccountConfig(
     cfg.accounts.app.id,
     cfg.accounts.app.tenant,
-    cfg.preferences,
+    cfg,
   );
   await setSecret(secretKeyForApp(cfg.accounts.app.id), s);
   await saveConfig(next, configPath);

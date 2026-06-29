@@ -221,6 +221,51 @@ export interface AppPreferences {
   agentStopGraceMs?: number;
 }
 
+export type RelayRole = 'front' | 'worker';
+
+/**
+ * Relay lets one bridge (a `front`, holding the single Feishu long-connection)
+ * forward events to another bridge (a `worker`, e.g. your laptop) that runs the
+ * agent and replies to Feishu itself. Absent = standalone (the default, single
+ * bridge). See src/relay for the transport.
+ *
+ * Auth needs NO extra secret: both sides already share the same app, so the
+ * relay handshake is HMAC'd with a key derived from the App Secret.
+ */
+export interface RelayConfig {
+  role: RelayRole;
+  /**
+   * `front`: HTTP bind address for the relay server (`host:port`). Workers
+   * dial in over SSE. Default `127.0.0.1:8787` (front it with a TLS reverse
+   * proxy, or set `0.0.0.0:<port>` — the HMAC handshake is the access gate).
+   */
+  listen?: string;
+  /**
+   * `worker`: base URL of the front's relay server, e.g.
+   * `https://your-server.example`. The ONE field a worker must set.
+   */
+  endpoint?: string;
+  /**
+   * `front`: which senders (open_id) are relayed to a worker. Falls back to a
+   * non-empty `guestPolicy.unrestrictedUsers`, then non-empty `access.admins`.
+   * Empty/unset everywhere = relay NOBODY (fail-safe — never relay strangers
+   * to your laptop). Untrusted senders stay on the front (guest sandbox).
+   */
+  route?: { users?: string[] };
+  /** Stable id for this worker (shown in logs; multi-worker future). Default: hostname. */
+  workerId?: string;
+  /**
+   * Optional relay-auth secret. When set, BOTH sides derive the relay HMAC key
+   * from it instead of the App Secret — lets you rotate/revoke relay access
+   * independently of the Feishu credential, and decouples "can connect to the
+   * relay" from "can act as the bot". Front and worker MUST agree (both set to
+   * the same value, or both unset). Unset = derive from the App Secret
+   * (zero-config default). Accepts the same forms as the app secret
+   * (plain / `${ENV}` / keystore ref).
+   */
+  secret?: SecretInput;
+}
+
 /**
  * Top-level config shape on disk.
  *
@@ -235,6 +280,7 @@ export interface AppConfig {
   };
   secrets?: SecretsConfig;
   preferences?: AppPreferences;
+  relay?: RelayConfig;
 }
 
 export function isComplete(cfg: Partial<AppConfig>): cfg is AppConfig {
@@ -402,6 +448,33 @@ export function isUnrestrictedUser(cfg: AppConfig, senderId: string): boolean {
   const list = policy.unrestrictedUsers ?? cfg.preferences?.access?.admins;
   if (!list || list.length === 0) return false;
   return list.includes(senderId);
+}
+
+/** The relay config, or undefined when relay is off (standalone bridge). */
+export function getRelayConfig(cfg: AppConfig): RelayConfig | undefined {
+  return cfg.relay;
+}
+
+/**
+ * The open_id set the front relays to a worker. Explicit `relay.route.users`
+ * wins; otherwise falls back to a NON-EMPTY `unrestrictedUsers`, then NON-EMPTY
+ * `admins`. Empty everywhere = relay nobody (fail-safe: an unset trust list
+ * must never mean "relay everyone to the laptop").
+ */
+export function relayTrustedUsers(cfg: AppConfig): string[] {
+  const route = cfg.relay?.route?.users?.filter(Boolean);
+  if (route && route.length > 0) return route;
+  const unrestricted = cfg.preferences?.guestPolicy?.unrestrictedUsers?.filter(Boolean);
+  if (unrestricted && unrestricted.length > 0) return unrestricted;
+  const admins = cfg.preferences?.access?.admins?.filter(Boolean);
+  if (admins && admins.length > 0) return admins;
+  return [];
+}
+
+/** True when `senderId` should be relayed to a worker (and is non-empty). */
+export function isRelayTrusted(cfg: AppConfig, senderId: string | undefined): boolean {
+  if (!senderId) return false;
+  return relayTrustedUsers(cfg).includes(senderId);
 }
 
 const TOOL_NAME_RE = /^[a-zA-Z0-9_]+$/;

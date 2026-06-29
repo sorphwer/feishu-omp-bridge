@@ -810,7 +810,7 @@ async function submitAccount(ctx: CommandContext): Promise<void> {
       newCfg = await buildEncryptedAccountConfig(
         appId,
         tenant,
-        ctx.controls.cfg.preferences,
+        ctx.controls.cfg,
       );
       await setSecret(secretKeyForApp(appId), appSecret);
       await saveConfig(newCfg, configPath);

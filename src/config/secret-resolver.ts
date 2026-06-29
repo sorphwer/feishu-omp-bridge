@@ -36,6 +36,17 @@ export async function resolveAppSecret(cfg: AppConfig): Promise<string> {
   return resolveSecretInput(secret, cfg.secrets, appId);
 }
 
+/**
+ * Resolve the relay auth key seed. Uses `relay.secret` when configured — lets
+ * a deployment rotate/revoke relay access without touching the Feishu App
+ * Secret — otherwise falls back to the App Secret so relay stays zero-config.
+ */
+export async function resolveRelaySecret(cfg: AppConfig, appSecret: string): Promise<string> {
+  const override = cfg.relay?.secret;
+  if (!override) return appSecret;
+  return resolveSecretInput(override, cfg.secrets, cfg.accounts.app.id);
+}
+
 async function resolveSecretInput(
   input: SecretInput,
   secretsCfg: AppConfig['secrets'],
