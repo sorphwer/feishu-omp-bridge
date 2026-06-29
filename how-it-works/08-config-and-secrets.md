@@ -37,7 +37,7 @@ interface AppConfig {
 | `ompTools` | 未设 | `--tools` 逗号白名单（全局，对所有人） | `getOmpTools` |
 | `codexBinary` | 未设 | 旧 Codex 可执行名，仅 `ompBinary` 缺失时用（遗留） | （`getOmpBinary` 回落） |
 | `codexModel` | 未设 | 旧 Codex 模型，仅 `ompModel` 缺失时用（遗留） | （`getOmpModel` 回落） |
-| `messageReply` | `card` | `card`/`markdown`/`text`；旧值 `text` 经 `messageReplyMigrated` 自动 coerce | `getMessageReplyMode` |
+| `messageReply` | `markdown` | `card`/`markdown`/`text`；未设回落 `markdown`；旧值 `text` 在 `messageReplyMigrated` 置位前 coerce 为 `markdown` | `getMessageReplyMode` |
 | `messageReplyMigrated` | — | 内部迁移标记（0.1.27 重命名语义） | — |
 | `showToolCalls` | `true` | `!== false`；关则隐藏工具调用块 | `getShowToolCalls` |
 | `maxConcurrentRuns` | `10` | clamp `[1,50]` | `getMaxConcurrentRuns` |
@@ -47,7 +47,7 @@ interface AppConfig {
 | `guestPolicy` | — | 见 [09](./09-access-and-guest-sandbox.md) | `getGuestPolicy` 等 |
 | `agentStopGraceMs` | `5000` | 范围 `[100,30000]`，越界回落默认 | `getAgentStopGraceMs` |
 
-`getMessageReplyMode` 默认 `card`（README 偏好表写默认 `markdown`，代码访问器实为 `card`——以代码为准）。
+`getMessageReplyMode` 未设时回落 `markdown`（与 README 偏好表一致）。注意：`messageReply` 字段的接口注释写 `Default 'card'`，但访问器实际回落 `markdown`——以访问器为准。
 
 ### 1.2 `RelayConfig`（见 [03](./03-feishu-transport.md)）
 

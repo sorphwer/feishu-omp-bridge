@@ -18,7 +18,7 @@
 
 ## 前置条件
 
-- Node.js 20+
+- Node.js 22+
 - pnpm（源码开发 / 本地构建时使用）
 - 已安装并配置 Oh My Pi CLI：先运行一次 `omp`，并确认 `omp --mode rpc` 可用。
 - 一个飞书 / Lark PersonalAgent 应用；首次启动向导会协助配置。
