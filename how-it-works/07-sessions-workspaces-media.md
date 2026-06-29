@@ -31,6 +31,17 @@ interface SessionEntry { sessionId?; cwd?; updatedAt:number; idleTimeoutMinutes?
 
 **关键不对称**（与 [04](./04-message-pipeline.md) 呼应）：session 仅在 `AgentEvent` 的 `system` 事件上由 `processAgentStream` 调 `sessions.set` 持久化；`done.sessionId` 不持久化。
 
+```mermaid
+flowchart TD
+  RUN["runAgentBatch"] --> RF["sessions.resumeFor(scope, cwd)"]
+  RF --> EX{"条目存在 且 entry.cwd == cwd?"}
+  EX -->|是| SID["返回 sessionId → omp --resume"]
+  EX -->|否| NONE["undefined (cwd 变 = 陈旧 → clear)"]
+  SYS["AgentEvent system{sessionId}"] -->|"仅此处持久化"| SET["sessions.set(scope, sessionId, cwd)"]
+  DONE["done.sessionId"] -.->|"不持久化"| X["(忽略)"]
+```
+
+
 ## 2. `WorkspaceStore`（`src/workspace/store.ts`）
 
 持久化到 `paths.workspacesFile`（`~/.feishu-omp-bridge/workspaces.json`）。
@@ -59,6 +70,18 @@ interface ResourceRequest { messageId; resource: ResourceDescriptor }
 - `resolveOne(dir, item)`：`sticker` 类型跳过（返回 null）；`kind = resource.type`；`pickFileName` 算文件名；先 `stat(path)` 命中即返回缓存（`cache-hit`）；否则 `im.v1.messageResource.get({params:{type}, path:{message_id, file_key}})` → `result.writeFile(path)`，返回新 `LocalAttachment`。（用 message-resource 端点而非 channel 的 `downloadResource`——后者只对 bot 自传文件有效。）
 - `pickFileName(r)`：用完整 `fileKey`（清洗）+ 可选 `fileName`（`sanitize`，截 80）；无 fileName 时按 type 给扩展名（image→.png/audio→.ogg/video→.mp4/其它→.bin）。`sanitize`/`dirFor` 把非 `[a-zA-Z0-9._-]` 替成 `_`。
 - `gcMediaCache(maxAgeMs)`（启动时以 24h 调用，见 [01](./01-overview-and-architecture.md)）：遍历各 chat 目录删 mtime 早于 cutoff 的文件，记 `media gc removed`。
+
+```mermaid
+flowchart TD
+  R["resolveOne(dir, item)"] --> ST{"type == sticker?"}
+  ST -->|是| SKIP["跳过 (null)"]
+  ST -->|否| FN["pickFileName"]
+  FN --> CACHE{"stat(path) 命中?"}
+  CACHE -->|是| HIT["返回缓存 (cache-hit)"]
+  CACHE -->|否| DL["im.v1.messageResource.get<br/>→ writeFile"]
+  DL --> NEW["新 LocalAttachment"]
+```
+
 
 在管线里：`runAgentBatch` 的 `attachments` 喂给 `buildPrompt` 的本地路径附录，`imagePaths`（`kind==='image'`）喂给 `agent.run` 的 `imagePaths`（OMP 转 image payload，见 [02](./02-agent-adapter-and-omp.md)）。
 

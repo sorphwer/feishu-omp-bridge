@@ -57,6 +57,19 @@ interface RunState { blocks:Block[]; reasoning:{content;active}; footer:FooterSt
 
 元素顺序（`elements`）：
 
+```mermaid
+flowchart TD
+  R["renderCard(state)"] --> E1["1 reasoning 面板<br/>(reasoning.content 非空)"]
+  E1 --> E2["2 UI 上下文面板<br/>(title/statuses/widgets/editorText)"]
+  E2 --> E3["3 block 分组<br/>text → markdown / tool → ToolGroup"]
+  E3 --> TG{"tool 组 >= 3 且已终结?"}
+  TG -->|是| COL["collapsedToolSummary (丢正文, 避 ~30KB 上限)"]
+  TG -->|否| EXP["逐个 toolPanel / 运行中最新展开"]
+  E3 --> E4["4 终结标记<br/>中断 / 超时 / 失败 / 空"]
+  E4 --> E5["5 footer + 停止按钮<br/>(仅 terminal==running)"]
+```
+
+
 1. **reasoning 面板**（`state.reasoning.content` 非空时）：`reasoningPanel`——可折叠面板，标题“🧠 思考中 / 思考完成，点击查看”，`active` 时展开，正文 `truncate(content, REASONING_MAX=1500)`。
 2. **UI 上下文面板**（`uiContextPanel(state.ui)` 非空时）：把 `title`/`statuses`/`widgets`/`editorText` 汇成一个蓝边可折叠面板“🧩 OMP 状态 / Widget”（`editorText` 截 1200）。
 3. **block 分组**（`groupBlocks` 把连续 tool 聚成 ToolGroup，text 单独成组）：
@@ -87,6 +100,22 @@ interface RunState { blocks:Block[]; reasoning:{content;active}; footer:FooterSt
 ## 7. `dispatcher.ts`：卡片回调分发
 
 `handleCardAction(deps)` 路由优先级：
+
+```mermaid
+flowchart TD
+  CA["handleCardAction"] --> V["取 value + formValue"]
+  V --> SCOPE["resolveScope (topic 查 thread_id)"]
+  SCOPE --> ACC{"isUserAllowed / isChatAllowed?"}
+  ACC -->|否| DROP["静默丢"]
+  ACC -->|是| P1{"__omp_ui?"}
+  P1 -->|是| OMPUI["respondToOmpUi<br/>activeRuns.respondToUi"]
+  P1 -->|否| P2{"__codex_cb?"}
+  P2 -->|是| FWD["forwardToAgent<br/>合成 [card-click] → pending.push"]
+  P2 -->|否| P3{"cmd?"}
+  P3 -->|是| RUNC["runCommandHandler(name, args)"]
+  P3 -->|否| IGN["忽略"]
+```
+
 
 1. 取 `value`（按钮 `value` 对象）与 `formValue`（CardKit 2.0 表单提交的 `raw.action.form_value`，靠 `includeRawEvent`）。
 2. `resolveScope(deps)`：非 topic 用 `chatId`；topic 用 `lookupMessageThreadId`（`im.v1.message.get` 取 carrier 消息 thread_id）拼 `${chatId}:${threadId}`，失败回落 chatId。

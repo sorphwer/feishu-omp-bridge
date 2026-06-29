@@ -12,6 +12,17 @@
 
 commander 程序 `feishu-omp-bridge`，默认子命令 `run`（`argv.length>2 ? argv : [...argv, 'run']`）：
 
+```mermaid
+flowchart LR
+  CLI["feishu-omp-bridge (默认 run)"]
+  CLI --> PROC["进程级"]
+  CLI --> SVC["服务级 (OS 守护)"]
+  CLI --> SEC["secrets 组"]
+  PROC --> R["run · ps · kill"]
+  SVC --> S["start · stop · restart<br/>status · unregister"]
+  SEC --> SS["get · set · list · remove"]
+```
+
 进程级：
 - `run`（默认）：`-c, --config <path>`、`--skip-check-lark-cli` → `runStart`（见 [01](./01-overview-and-architecture.md)）。
 - `ps` → `runPs`（列本机进程）。
@@ -35,6 +46,15 @@ commander 程序 `feishu-omp-bridge`，默认子命令 `run`（`argv.length>2 ? 
 ## 3. 服务适配器（`daemon/`）
 
 `ServiceAdapter` 接口（`daemon/service-adapter.ts`）：`platformName`、`fileExists()`、`isRunning()`、`servicePath()`、`install()`、`start()`、`stop()`、`stopAndDisableAutostart()`、`restart()`、`waitUntilStopped(timeoutMs?)`、`deleteFile()`、`describeStatus()`、`parseStatus(text)`（提取 pid/lastExit）。返回值可同步或异步（`ServiceResultLike`）。`getServiceAdapter()` 按平台返回 `makeLaunchdAdapter`/`makeSystemdAdapter`/`makeSchtasksAdapter`，不支持的 OS 返回 null。
+
+```mermaid
+flowchart TD
+  GET["getServiceAdapter()"] --> OS{"平台?"}
+  OS -->|macOS| LD["launchd (plist, KeepAlive=true)"]
+  OS -->|Linux| SD["systemd --user (Restart=always)"]
+  OS -->|Windows| ST["schtasks (ONLOGON .cmd)"]
+  OS -->|其它| NULL["null (不支持)"]
+```
 
 服务标识（`daemon/paths.ts`）：
 
@@ -83,6 +103,15 @@ daemon 日志：`daemonLogDir()`=`~/.feishu-omp-bridge/logs/`，`daemonStdoutPat
 - `stop(sig)`：幂等，断开 bridge、`unregisterSync(entry.id)`、`process.exit(0)`。注册到 `SIGINT`/`SIGTERM`。
 - `process.on('exit')`：`unregisterSync` + `cleanupTmpFiles`（兜底，防绕过 stop 的退出留下陈旧条目）。
 - `controls.restart()`：**连后断**——先 `startBridge` 新 bridge，成功才断旧 bridge（新 bridge 起不来时抛错保留旧 bridge 及其 keepalive，下一 keepalive tick 可重试）。`/account`、`/reconnect`、keepalive 强制重连都走它。
+
+```mermaid
+flowchart LR
+  REQ["controls.restart()<br/>(/account · /reconnect · keepalive)"] --> NEW["startBridge 新 bridge"]
+  NEW --> OK{"起来了?"}
+  OK -->|是| KILL["断开旧 bridge (连后断)"]
+  OK -->|否| KEEP["抛错: 保留旧 bridge + keepalive<br/>下一 tick 重试"]
+```
+
 
 ## 7. 是否后端通用
 

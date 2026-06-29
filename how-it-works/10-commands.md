@@ -17,6 +17,23 @@
 - **`tryHandleCommand(ctx)`（文本路径）**：`msg.content.trim()` 不以 `/` 开头返回 false；拆 `cmd`/`args`；无对应 handler 返回 false；admin 命令但 `!isAdmin(cfg, senderId)` → 回复“❌ 此命令仅管理员可用。”返回 true；否则 `await h(args, ctx)`（异常只记日志），返回 true。被 intake 调用，处理则 `pending.cancel(scope)`（见 [04](./04-message-pipeline.md)）。
 - **`runCommandHandler(name, args, ctx)`（卡片路径）**：从卡片按钮 `cmd` 触发（见 [05](./05-streaming-and-cards.md) dispatcher）。同样的 admin 门控，但卡片合成的 msg 无法自然回复，故 admin 拒绝时静默（按钮本就只对拿到原卡的用户渲染）。
 
+```mermaid
+flowchart TD
+  subgraph TEXT["文本路径 tryHandleCommand"]
+    TC{"msg 以 / 开头 且有 handler?"}
+    TC -->|否| FALSE["return false → 当普通消息"]
+    TC -->|是| TADM{"admin 命令 且 !isAdmin?"}
+    TADM -->|是| TDENY["回复 ❌ 仅管理员"]
+    TADM -->|否| TRUN["h(args, ctx) + pending.cancel"]
+  end
+  subgraph CARD["卡片路径 runCommandHandler"]
+    CC["按钮 cmd 触发"] --> CADM{"admin 命令 且 !isAdmin?"}
+    CADM -->|是| CDENY["静默 (按钮本就受限渲染)"]
+    CADM -->|否| CRUN["submit* / handler"]
+  end
+```
+
+
 `CommandContext` 携带 `channel`/`msg`/`scope`/`chatMode`/`sessions`/`workspaces`/`agent`/`activeRuns`/`controls`/`formValue?`/`fromCardAction?`。`Controls` 携带 `restart()`/`exit()`/`configPath`/`cfg`（快照，按引用共享，故 `/config`/`/switch` 就地改 `cfg.preferences` 即下条消息生效）/`processId`。`reply(ctx, md)` 是吞错的 markdown 回复。
 
 ## 2. 逐命令
@@ -47,6 +64,18 @@
 `/config`、`/switch`、`/account` 都用托管卡片（`sendManagedCard`/`updateManagedCard`，见 [05](./05-streaming-and-cards.md)）+ CardKit 2.0 表单。提交从卡片按钮回调（`cmd: 'config.confirm'` 等）经 dispatcher → `runCommandHandler` → 对应 `submit*`，`formValue` 携带输入值。
 
 注意 `FORM_SETTLE_MS=1000`：Lark 客户端在表单提交后短窗口内持有“刚提交”的本地态会覆盖我们的 `cardkit.card.update`，故终态翻转前都至少等这么久。`submitConfig`/`submitSwitch` 都用 `void (async()=>{...})()` 解耦，先 `waitForSettle` 再 update。
+
+```mermaid
+sequenceDiagram
+  participant U as 用户 (Lark 客户端)
+  participant D as dispatcher → runCommandHandler
+  participant C as managed card
+  U->>D: 提交表单 (cmd config.confirm, form_value)
+  D->>D: submitConfig: 改 cfg.preferences + saveConfig
+  Note over D,C: waitForSettle(FORM_SETTLE_MS=1000)<br/>避开客户端"刚提交"本地态覆盖
+  D->>C: updateManagedCard (终态: 已保存)
+```
+
 
 ## 4. 卡片模板（`src/card/templates.ts`）
 

@@ -12,6 +12,18 @@
 
 整个系统是“一根管子”，自顶向下四层，各层只认相邻层的契约：
 
+```mermaid
+flowchart TD
+  T["① 传输层 transport<br/>LarkChannel · 规范化事件"]
+  O["② 编排层 orchestration<br/>channel.ts · intake / 去抖 / 并发 / 回写"]
+  A["③ Agent 适配器层<br/>AgentAdapter / AgentRun / AgentEvent 契约"]
+  P["④ 呈现层 presentation<br/>card/ · reduce → CardKit 2.0"]
+  T -->|"NormalizedMessage 等"| O
+  O -->|"agent.run(opts)"| A
+  A -->|"AgentEvent 流"| P
+  P -.->|"渲染卡片回写"| O
+```
+
 1. **传输层（transport）**：`@larksuiteoapi/node-sdk` 的 `LarkChannel` 负责 WebSocket 长连接、OpenAPI REST、把 Feishu 原始事件规范化成 `NormalizedMessage` / `CardActionEvent` / `CommentEvent`。bridge 自己只在这层之上注册回调。详见 [03](./03-feishu-transport.md)。
 2. **编排层（orchestration）**：`src/bot/channel.ts` 的 `createBridgeRuntime` 把规范化事件接入 intake → 去抖（`PendingQueue`）→ 并发受限的 run（`ProcessPool`）→ 流式回写。命令、访问控制、@提及门控、卡片回调都在这层。详见 [04](./04-message-pipeline.md)、[10](./10-commands.md)。
 3. **Agent 适配器层（agent-adapter）**：`src/agent/types.ts` 定义 `AgentAdapter` / `AgentRun` / `AgentEvent` 契约，`src/agent/omp/` 提供唯一实现 `OmpAdapter`。详见 [02](./02-agent-adapter-and-omp.md)。
@@ -28,11 +40,40 @@
 
 它们之间的 `processAgentStream`（`channel.ts`）是**完全后端无关**的——它只迭代 `run.events`，按事件类型驱动 idle watchdog、持久化 session、reduce 状态、flush 卡片。所以换后端 = 写一个新 `AgentAdapter`，编排层和呈现层零改动。这就是 [dify-feishu-bridge-design](../dify-feishu-bridge-design/README.md) 整套设计的支点。
 
+```mermaid
+flowchart LR
+  subgraph SEAM["唯二 OMP 耦合点"]
+    CTOR["构造点 start.ts<br/>new OmpAdapter(...)"]
+    CALL["调用点 channel.ts<br/>agent.run({...})"]
+  end
+  subgraph AGN["后端无关 (换后端零改动)"]
+    PS["processAgentStream<br/>迭代 run.events"]
+    RED["reduce → RunState → 卡片"]
+  end
+  CTOR --> CALL
+  CALL -->|"AgentRun"| PS
+  PS --> RED
+```
+
 ## 3. 启动序列（`runStart`）
 
 入口链：`bin/feishu-omp-bridge.mjs`（`import '../dist/cli.js'`）→ tsup 把 `src/cli/index.ts` 打成 `dist/cli.js` → commander 解析 argv，默认子命令 `run` → `runStart(opts)`（`src/cli/commands/start.ts`）。
 
 `runStart` 的完整步骤（按代码顺序）：
+
+```mermaid
+flowchart TD
+  S1["1 loadConfig / 向导<br/>(扫码注册 + 加密落盘)"]
+  S2["2 preFlightChecks<br/>(lark-cli 检测/安装/绑定)"]
+  S3["3 new OmpAdapter + isAvailable<br/>探测模型目录 (非致命)"]
+  S4["4 SessionStore / WorkspaceStore load"]
+  S5["5 GC 媒体 + 日志"]
+  S6["6 冲突检测<br/>(非 worker 才查 sameAppOthers)"]
+  S7["7 register → processes.json"]
+  S8["8 Controls + 信号<br/>startBridge (front / worker)"]
+  S9["9 keepalive + 监听<br/>挂住事件循环"]
+  S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9
+```
 
 1. **配置加载 / 向导**：`loadConfig(configPath)`——`resolveConfigPath` 在 `config.json` → `config.yaml` → `config.yml` 中取首个存在者（`-c` 显式非默认路径原样用），按扩展名以 JSON 或 YAML 解析（见 [08](./08-config-and-secrets.md) §4）。若 `isComplete(existing)` 为真则用之，并 `maybeMigratePlaintextSecret`（把 `accounts.app.secret` 里的明文字符串迁进加密 keystore，重写成 exec SecretRef，幂等）；否则跑 `runRegistrationWizard()`（扫码创建应用，见 [03](./03-feishu-transport.md)），再 `persistEncrypted` 立即加密落盘。
 2. **预检（preflight）**：`preFlightChecks({ skipCheckLarkCli })`——检测 / 自动安装并绑定 `lark-cli`（`--skip-check-lark-cli` 跳过）。见 [11](./11-daemon-cli-runtime.md)。

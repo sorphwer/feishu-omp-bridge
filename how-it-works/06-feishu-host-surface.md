@@ -45,11 +45,33 @@
 
 `runAgentBatch`（`channel.ts`，见 [04](./04-message-pipeline.md)）每次 run 都 `createFeishuHostIntegration(channel, {scope,chatId,threadId,replyToMessageId:lastMsg.messageId,cwd})`，把 `feishuHost.tools` / `feishuHost.uriSchemes` 作为 `hostTools` / `hostUriSchemes` 传给 `agent.run({...})`。
 
+```mermaid
+flowchart TD
+  RB["runAgentBatch: createFeishuHostIntegration"] --> G{"profile.feishuHostTools?"}
+  G -->|开| ADD["hostTools = 4 个 feishu_* + commandTools<br/>+ feishu:// scheme<br/>(FEISHU_HOST_TOOL_NAMES 计入 --tools 白名单)"]
+  G -->|关| ONLY["仅 commandTools"]
+```
+
+
 host 工具面随 **profile** 走（见 [09](./09-access-and-guest-sandbox.md)）：`profile.feishuHostTools` 开才在 command tools 上并入这 4 个 feishu host tools + `feishu://` scheme；关则只暴露 command tools（`feishu://` 能按 id 读任意消息，故随同一开关）。受限 profile 的 `--tools` allowlist 通过 `feishu-host.ts` 导出的 `FEISHU_HOST_TOOL_NAMES` 把这些 host 工具名计入——否则 fail-closed hook 会把刚注册的 host 工具一并拦掉。
 
 ## 4. 在 OMP RPC 循环里执行
 
 `OmpAdapter.createEventStream`（见 [02](./02-agent-adapter-and-omp.md)）在 ready 帧时把 `tools.map(t=>t.definition)` 通过 `set_host_tools` 帧、`schemes.map(s=>s.definition)` 通过 `set_host_uri_schemes` 帧告知 OMP。之后：
+
+```mermaid
+sequenceDiagram
+  participant O as omp
+  participant A as adapter (handleHostToolCall)
+  participant T as host tool (进程内, 不经 shell)
+  O-->>A: host_tool_call {toolCallId, toolName, arguments}
+  Note over A: emit tool_use
+  A->>T: tool.execute(arguments)
+  T-->>A: result / isError
+  A->>O: host_tool_result (normalizeToolResult)
+  Note over A: emit tool_result (→ 卡片)
+```
+
 
 - 收到 `host_tool_call` 帧 → `handleHostToolCall(child, hostTools, frame)`：emit `tool_use` → 找 tool → `execute(arguments)` → 写回 `host_tool_result`（`normalizeToolResult` 包成 `{content:[{type:'text',text}]}`）+ emit `tool_result`。
 - 收到 `host_uri_request` 帧 → `handleHostUriRequest(child, hostUriSchemes, frame)`：emit `tool_use`（name `host_uri_read`/`host_uri_write`）→ 找 scheme → `handle({operation,url,content})` → 写回 `host_uri_result` + emit `tool_result`。

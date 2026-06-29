@@ -16,25 +16,19 @@
 
 ## 分层架构
 
-```text
-       Feishu / Lark 服务端
-            │  WebSocket 长连接 / OpenAPI REST
-            ▼
-  @larksuiteoapi/node-sdk  ──  LarkChannel
-            │  NormalizedMessage / CardActionEvent / CommentEvent
-            ▼
-  src/bot/channel.ts  ── createBridgeRuntime（intake → debounce → run）
-            │            ├─ 访问控制 / @提及门控 / 命令分发
-            │            ├─ PendingQueue（去抖）+ ProcessPool（并发上限）
-            │            └─ runAgentBatch → processAgentStream
-            ▼
-  src/agent/types.ts  ──  AgentAdapter（唯一的可替换“缝”）
-            │  AgentRun.events: AsyncIterable<AgentEvent>
-            ▼
-  src/agent/omp/OmpAdapter  ──  spawn omp --mode rpc
-            │  JSONL over stdio（ready → set_host_tools → get_state → prompt …）
-            ▼
-       omp --mode rpc --session-dir ~/.feishu-omp-bridge/omp-sessions
+```mermaid
+flowchart TD
+  FS["Feishu / Lark 服务端"]
+  SDK["@larksuiteoapi/node-sdk · LarkChannel"]
+  CH["src/bot/channel.ts · createBridgeRuntime<br/>(intake → debounce → run)"]
+  AD["src/agent/types.ts · AgentAdapter<br/>(唯一可替换的缝)"]
+  OMP["src/agent/omp/OmpAdapter<br/>spawn omp --mode rpc"]
+  PROC["omp --mode rpc<br/>--session-dir ~/.feishu-omp-bridge/omp-sessions"]
+  FS -->|"WS 长连接 / OpenAPI REST"| SDK
+  SDK -->|"NormalizedMessage / CardActionEvent / CommentEvent"| CH
+  CH -->|"访问控制 · @提及门控 · 命令分发<br/>PendingQueue 去抖 + ProcessPool 并发"| AD
+  AD -->|"AgentRun.events: AsyncIterable&lt;AgentEvent&gt;"| OMP
+  OMP -->|"JSONL over stdio<br/>ready → set_host_tools → get_state → prompt"| PROC
 ```
 
 呈现侧（卡片/文本）只消费规范化后的 `AgentEvent` 联合类型，对“后端是谁”完全无感。换一个后端（例如 Dify）= 只写一个新的 `AgentAdapter`，下游全部复用——这正是 `dify-feishu-bridge-design/` 那套设计文档的立足点。

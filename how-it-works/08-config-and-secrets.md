@@ -82,6 +82,21 @@ interface PolicyConfig {
 
 `resolveAppSecret(cfg)` → `resolveSecretInput(secret, cfg.secrets, appId)`：
 
+```mermaid
+flowchart TD
+  IN["resolveSecretInput(secret)"] --> STR{"是字符串?"}
+  STR -->|是| TPL{"匹配 ${VAR}?"}
+  TPL -->|是| ENV1["process.env[VAR]"]
+  TPL -->|否| PLAIN["原样返回"]
+  STR -->|"否 (SecretRef)"| SRC{"source?"}
+  SRC -->|env| E["resolveEnvRef<br/>(allowlist 校验)"]
+  SRC -->|file| F["resolveFileRef (读文件 trim)"]
+  SRC -->|exec| X{"command 是本 bridge<br/>secrets-getter?"}
+  X -->|是| SELF["self-bridge 短路<br/>直读 keystore getSecret"]
+  X -->|否| SPAWN["spawnExecProvider<br/>(stdin JSON → stdout values)"]
+```
+
+
 1. **plain / template**（`SecretInput` 是字符串）：`resolvePlainOrTemplate`——若匹配 `ENV_TEMPLATE_RE=^${VAR}$` 则读 `process.env[VAR]`，否则原样返回。
 2. **env**（`SecretRef.source==='env'`）：`resolveEnvRef`——若 provider 有非空 `allowlist` 且 `ref.id` 不在其中则拒；读 `process.env[ref.id]`。
 3. **file**：`resolveFileRef`——`provider.path ? join(path, id) : id` 读文件 trim。
@@ -107,6 +122,20 @@ provider 级联：`lookupProvider` 按 `ref.provider ?? secrets.defaults?.[sourc
 - `saveConfig(cfg, path?)`：**原子写**——写同目录临时文件（0600 权限）再 `rename`，避免半写窗口与宽权限明文残留；按解析出的文件扩展名序列化（YAML 写回会丢手写注释——`/config`、`/account` 等程序化改动会整篇重序列化）。
 - `buildEncryptedAccountConfig(appId, tenant, preferences?)`：把 app secret 指向加密 keystore 的 exec-provider SecretRef，保留既有 `preferences`。用于 `/account` 改凭据与首启迁移。
 - `ensureSecretsGetterWrapper()`：写 `~/.feishu-omp-bridge/secrets-getter` 薄包装脚本（用户所有、非符号链接），内部 `exec` 真正的 `node + bridge secrets get`——满足 lark-cli 的 `AssertSecurePath` 审计（不管 node 如何安装）。bridge 自身在 resolver 里见到这个 wrapper 路径就短路直读 keystore（见 §2）。
+
+```mermaid
+flowchart LR
+  RC["resolveConfigPath(explicit?)"] --> EXP{"显式非默认路径?"}
+  EXP -->|是| USE["原样用"]
+  EXP -->|否| J{"config.json 存在?"}
+  J -->|是| UJ["用 config.json"]
+  J -->|否| Y{"config.yaml 存在?"}
+  Y -->|是| UY["用 config.yaml"]
+  Y -->|否| YML{"config.yml 存在?"}
+  YML -->|是| UYML["用 config.yml"]
+  YML -->|否| DEF["回落 config.json (默认写入)"]
+```
+
 
 ## 5. 安全模型（`README.md`）
 

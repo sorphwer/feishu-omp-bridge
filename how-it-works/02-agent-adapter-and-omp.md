@@ -154,6 +154,25 @@ interface AgentAdapter {
 
 ### 2.3 `createEventStream`：JSONL 握手循环
 
+
+```mermaid
+sequenceDiagram
+  participant B as bridge (createEventStream)
+  participant O as omp --mode rpc
+  O-->>B: ready 帧
+  B->>O: set_host_tools (hostTools 非空时)
+  B->>O: set_host_uri_schemes (有则)
+  B->>O: get_state (state_1)
+  B->>O: prompt (prompt_1, buildOmpPrompt + images)
+  loop 每行 JSONL
+    O-->>B: host_tool_call / host_uri_request
+    B->>O: host_tool_result / host_uri_result
+    O-->>B: message_update / tool_execution_* / turn_end ...
+    Note over B: translateOmpFrame → AgentEvent (yield)
+  end
+  O-->>B: agent_end → done (terminal, break)
+```
+
 异步生成器，逐行读 child.stdout（`readline`），每行 `parseOmpJsonLine`：
 
 1. 若 `child.pid` 缺失 → emit `error` 并返回。

@@ -58,11 +58,38 @@ sequenceDiagram
 
 净效果：**每 scope 最多一个 run 在飞**，run 期间所有消息合并进下一 batch（且要等 run 结束后再静默 600ms 才 flush）。
 
+```mermaid
+flowchart LR
+  FLUSH["onFlush(scope, batch)"] --> BLK["pending.block(scope)"]
+  BLK --> ACQ["pool.acquire()<br/>(跨 bridge 并发上限)"]
+  ACQ --> RUN["runAgentBatch(...)"]
+  RUN --> FIN["finally: release()<br/>+ pending.unblock(scope)"]
+  FIN -.->|"残留消息重新武装 600ms"| FLUSH
+```
+
+
 `dispatchMessage`→`intakeMessage`、`dispatchCardAction`→`handleCardAction`（见 [05](./05-streaming-and-cards.md)）、`dispatchComment`→`handleCommentMention`（见 [03](./03-feishu-transport.md)）、`shutdown`→`pending.cancelAll()` + `activeRuns.stopAll()` + flush stores。
 
 ## 2. `intakeMessage`：门控与分流
 
 按序（`src/bot/channel.ts`）：
+
+```mermaid
+flowchart TD
+  IN["intakeMessage(msg)"] --> SC["scope 解析<br/>(topic → chatId:threadId)"]
+  SC --> A1{"isUserAllowed?"}
+  A1 -->|否| DROP["静默丢弃 (不回复, 免暴露 bot)"]
+  A1 -->|是| A2{"群 且 !isChatAllowed?"}
+  A2 -->|是| DROP
+  A2 -->|否| MEN{"群 且 需 @bot 而未提及?"}
+  MEN -->|是| DROP
+  MEN -->|否| CMD{"是 / 命令?"}
+  CMD -->|是| HC["tryHandleCommand<br/>+ pending.cancel"]
+  CMD -->|否| AR{"有 active run 且支持 submitPrompt?"}
+  AR -->|是| SUB["submitToActiveRun<br/>(! → steer, 否则 follow_up)"]
+  AR -->|否| PUSH["pending.push(scope, msg)"]
+```
+
 
 1. **scope 解析**：`chatMode = chatModeCache.resolve(channel, msg.chatId)`；`scope = (chatMode==='topic' && msg.threadId) ? \`${chatId}:${threadId}\` : chatId`。
 2. **访问控制（静默丢弃）**：`!isUserAllowed(cfg, senderId)` 直接 return（回复会暴露 bot）；`chatType!=='p2p' && !isChatAllowed(cfg, chatId)` 直接 return（`allowedChats` 故意只作群门控——p2p chat_id 按用户对生成、不可被冒用，用户 allowlist 已是 DM 的权威）。见 [09](./09-access-and-guest-sandbox.md)。
