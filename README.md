@@ -327,6 +327,41 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
 - 生成的沙箱产物在 `~/.feishu-omp-bridge/guest/`(overlay + 白名单 hook,自动维护)。
 - 本地回归验证:`pnpm test:guest`(加 `--model` 跑真实模型越权测试)。
 
+### 统一策略（`policy`，进阶）
+
+`access` / `guestPolicy` / `relay.route` 覆盖常见场景。需要**按场景 × 身份**精细映射工具模式时，用顶层 `policy` 块——三条正交命名轴：
+
+- **`principals`**：命名身份组（open_id）。未列入者 = 隐式 `guest`。每个组可带 `run: front|worker`（在哪端跑；`guest` 恒 front）。
+- **`profiles`**：命名工具模式。内置 `full`（全开）与 `locked`（零工具）恒存在。`tools: 'all'` = 全开；`tools: [...]` = 受限沙箱（钉死内置工具，关发现源/共享记忆，加 fail-closed hook）。可带 `commandTools` / `feishuHostTools` / `maxToolCalls` / `systemPrompt` / `discovery` / `memory` / `extensions`（你自己的 `.mjs` hook 文件路径，做更复杂的工具/调用次数限制，与自动 hook 叠加）。
+- **`rules`**：首条命中（first-match）映射 `{ when: { chat?, principal?, chatId? }, profile }`；`chat` 取 `p2p`/`group`/`topic`（`group` 亦匹配 `topic`）。
+
+```json
+{
+  "policy": {
+    "principals": {
+      "owner": { "users": ["ou_me"], "run": "worker" },
+      "team": ["ou_a", "ou_b"]
+    },
+    "profiles": {
+      "readonly": { "tools": ["read", "search"] },
+      "kb": { "tools": [], "commandTools": [{ "name": "zendesk_kg", "command": "zendesk-kg" }] }
+    },
+    "rules": [
+      { "when": { "chat": "p2p", "principal": "owner" }, "profile": "full" },
+      { "when": { "chat": "p2p", "principal": "team" }, "profile": "readonly" },
+      { "when": { "chat": "group" }, "profile": "kb" }
+    ]
+  }
+}
+```
+
+- **缺省 = 向后兼容**：未设 `policy` 时按旧 `access`/`guestPolicy`/`relay.route` 自动合成等价策略，行为不变。
+- **显式 = fail-closed**：设了 `policy` 后，未命中任何 rule 或指向未知 profile 的发送者跑 `locked`（零工具），不回落全集——务必写一条兜底 rule。
+- 群批次多发送者时**最严者胜**；策略同时作用于消息、卡片回调与云文档评论。
+- 配置文件可用 **JSON 或 YAML**（`config.json` / `config.yaml` / `config.yml`，按此顺序取首个存在者）。
+- ⚠️ 改 `policy` 后需**整进程重启** `restart`。
+- 📖 完整配方（front/worker 分流、群聊 vs 私聊、自定义 `.mjs` hook 等）见 [**配置指南 CONFIGURATION.zh.md**](./CONFIGURATION.zh.md)。
+
 ## 中继 / Relay（多机分流）
 
 一个飞书 app 的事件只能投递给单一入口,无法让飞书自己按发送者把"你"投到本地、"别人"投到服务器。relay 解决这个:一台 **front**(常开服务器)持有唯一的飞书长连接,按发送者把信任用户的事件**中继**给一台 **worker**(如你的笔记本);worker 不连飞书事件流,只跑 OMP 并用同一个 app 凭据**自己回写飞书**。其余人留在 front(走访客沙箱)。

@@ -6,7 +6,6 @@ import { startBridge, type BridgeChannel } from '../../bot/channel';
 import { runRegistrationWizard } from '../../bot/wizard';
 import type { Controls } from '../../commands';
 import { setSecret } from '../../config/keystore';
-import { paths } from '../../config/paths';
 import type { AppConfig } from '../../config/schema';
 import {
   getOmpBinary,
@@ -20,6 +19,7 @@ import {
   buildEncryptedAccountConfig,
   ensureSecretsGetterWrapper,
   loadConfig,
+  resolveConfigPath,
   saveConfig,
 } from '../../config/store';
 import { gcOldLogs, log } from '../../core/logger';
@@ -63,7 +63,7 @@ export interface StartOptions {
 }
 
 export async function runStart(opts: StartOptions): Promise<void> {
-  const configPath = opts.config ?? paths.configFile;
+  const configPath = await resolveConfigPath(opts.config);
   const existing = await loadConfig(configPath);
 
   let cfg: AppConfig;

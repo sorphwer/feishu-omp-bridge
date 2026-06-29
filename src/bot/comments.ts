@@ -1,9 +1,13 @@
 import { homedir } from 'node:os';
 import type { CommentEvent, LarkChannel } from '@larksuiteoapi/node-sdk';
 import type { AgentAdapter } from '../agent/types';
+import { resolveBatchProfile } from '../config/policy';
+import type { AppConfig } from '../config/schema';
 import { log } from '../core/logger';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
+import { buildCommandTools } from './command-tools';
+import { buildProfileRunArgs } from './guest-lockdown';
 import { addCommentReaction, removeCommentReaction } from './reaction';
 
 export interface CommentDeps {
@@ -12,6 +16,7 @@ export interface CommentDeps {
   agent: AgentAdapter;
   sessions: SessionStore;
   workspaces: WorkspaceStore;
+  cfg: AppConfig;
 }
 
 // File types supported by drive.v1.fileComment.get; other types (slides,
@@ -59,7 +64,7 @@ interface CommentContext {
  * a reply in the same comment thread.
  */
 export async function handleCommentMention(deps: CommentDeps): Promise<void> {
-  const { channel, evt, agent, sessions, workspaces } = deps;
+  const { channel, evt, agent, sessions, workspaces, cfg } = deps;
   // Log every comment event we receive, regardless of whether we'll act on it.
   // `mentionedBot` and `replyId` here let us tell apart top-level comments
   // from thread replies (the latter requires SDK ≥ 1.65.0-alpha.0).
@@ -123,8 +128,26 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
     ? await addCommentReaction(channel, target.fileToken, target.fileType, ctx.targetReplyId)
     : false;
 
+  // Cloud docs are a SHARED surface, so resolve the commenter's profile under
+  // the 'group' scenario — the configured sandbox applies here too, closing the
+  // bypass where a non-trusted commenter would otherwise run full tools. Absent
+  // any sandbox config this stays full-tools (today's behavior). Comments have
+  // no Feishu host integration, so only command tools are exposed.
+  const { profile } = resolveBatchProfile(cfg, [evt.operator.openId], { chat: 'group' });
+  const guestArgs = await buildProfileRunArgs(profile);
+  const commandTools = buildCommandTools(profile.commandTools, cwd);
+  const runPrompt = profile.systemPrompt ? `${profile.systemPrompt}\n\n---\n\n${prompt}` : prompt;
+  log.info('comment', 'policy', { profile: profile.name, restricted: profile.restricted, tools: guestArgs.tools });
   try {
-    const run = agent.run({ prompt, sessionId: resumeFrom, cwd });
+    const run = agent.run({
+      prompt: runPrompt,
+      sessionId: resumeFrom,
+      cwd,
+      hostTools: commandTools,
+      tools: guestArgs.tools,
+      configOverlayPaths: guestArgs.configOverlayPaths,
+      extensionPaths: guestArgs.extensionPaths,
+    });
     let answer = '';
     let errorMsg: string | undefined;
     let terminal = false;

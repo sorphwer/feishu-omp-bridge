@@ -1,13 +1,44 @@
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { access, chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, extname } from 'node:path';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { paths } from './paths';
 import type { AppConfig, TenantBrand } from './schema';
 import { secretKeyForApp } from './schema';
 
-export async function loadConfig(path: string = paths.configFile): Promise<Partial<AppConfig>> {
+/**
+ * Resolve which config file to read/write. An explicit non-default path
+ * (`--config foo.yaml`, a test tmp file) is honored verbatim. Otherwise we pick
+ * the first existing of config.json / config.yaml / config.yml, falling back to
+ * config.json (the default for a first write). This lets a hand-written YAML
+ * config be discovered — and rewritten in place — without every caller knowing
+ * the format; callers keep passing `paths.configFile` (or nothing).
+ */
+export async function resolveConfigPath(explicit?: string): Promise<string> {
+  if (explicit && explicit !== paths.configFile) return explicit;
+  for (const p of [paths.configFile, paths.configFileYaml, paths.configFileYml]) {
+    try {
+      await access(p);
+      return p;
+    } catch {
+      // not present — try the next candidate
+    }
+  }
+  return paths.configFile;
+}
+
+function isYamlPath(path: string): boolean {
+  const ext = extname(path).toLowerCase();
+  return ext === '.yaml' || ext === '.yml';
+}
+
+export async function loadConfig(path?: string): Promise<Partial<AppConfig>> {
+  const resolved = await resolveConfigPath(path);
   try {
-    const text = await readFile(path, 'utf8');
-    return JSON.parse(text) as Partial<AppConfig>;
+    const text = await readFile(resolved, 'utf8');
+    const parsed = isYamlPath(resolved)
+      ? (parseYaml(text) as Partial<AppConfig> | null | undefined)
+      : (JSON.parse(text) as Partial<AppConfig>);
+    return parsed ?? {};
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
     throw err;
@@ -99,12 +130,16 @@ export async function ensureSecretsGetterWrapper(): Promise<string> {
   return wrapperPath;
 }
 
-export async function saveConfig(cfg: AppConfig, path: string = paths.configFile): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
-  await writeFile(tmp, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+export async function saveConfig(cfg: AppConfig, path?: string): Promise<void> {
+  const resolved = await resolveConfigPath(path);
+  await mkdir(dirname(resolved), { recursive: true });
+  const tmp = `${resolved}.tmp-${process.pid}`;
+  // Write in the resolved file's format. YAML round-trips drop hand-written
+  // comments — programmatic edits (/config, /account) reserialize the doc.
+  const text = isYamlPath(resolved) ? stringifyYaml(cfg) : `${JSON.stringify(cfg, null, 2)}\n`;
+  await writeFile(tmp, text, 'utf8');
   // chmod the temp file before rename, so the destination path is never
   // visible with default permissions.
   await chmod(tmp, 0o600);
-  await rename(tmp, path);
+  await rename(tmp, resolved);
 }

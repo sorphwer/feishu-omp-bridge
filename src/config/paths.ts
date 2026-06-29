@@ -7,6 +7,8 @@ export const paths = {
   appDir,
   cacheDir: appDir,
   configFile: join(appDir, 'config.json'),
+  configFileYaml: join(appDir, 'config.yaml'),
+  configFileYml: join(appDir, 'config.yml'),
   sessionsFile: join(appDir, 'sessions.json'),
   workspacesFile: join(appDir, 'workspaces.json'),
   processesFile: join(appDir, 'processes.json'),

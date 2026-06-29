@@ -267,6 +267,115 @@ export interface RelayConfig {
 }
 
 /**
+ * ── Unified policy model ──────────────────────────────────────────────────
+ *
+ * Three orthogonal, named axes that together decide, for every inbound event:
+ *   - WHO    `principals`: named open_id groups. Anyone not listed is `guest`.
+ *   - WHAT   `profiles`:   named agent tool modes (full / restricted sandboxes).
+ *   - WHEN   `rules`:      first-match (scenario × principal × chat) -> profile.
+ *   - WHERE  per-principal `run`: front (local) or worker (relayed to a laptop).
+ *
+ * Absent `policy` = back-compat: a policy is synthesized from the legacy
+ * `preferences.access` / `preferences.guestPolicy` / `relay.route` fields (see
+ * `synthesizeLegacyPolicy` in policy.ts), so deployed configs keep working.
+ * When `policy` IS present it is authoritative and fail-closed: a sender that
+ * matches no rule, or a rule naming an unknown profile, runs LOCKED (zero
+ * tools) rather than falling open to the full tool set.
+ */
+export type PolicyRunTarget = 'front' | 'worker';
+
+/** A chat scenario an event can occur in. `group` rules also match `topic`. */
+export type PolicyScenario = 'p2p' | 'group' | 'topic';
+
+/**
+ * A named identity group. The shorthand `string[]` form (just open_ids) is
+ * accepted and coerces to `{ users, run: 'front' }`.
+ */
+export interface PrincipalConfig {
+  /** open_id members of this principal. */
+  users: string[];
+  /**
+   * Where this principal's runs execute. Default `front` (handled locally).
+   * `worker` relays the run to a connected worker (e.g. your laptop). This is
+   * a per-PERSON property, not per-scenario: a principal is either all-front or
+   * all-worker, so the interactive cards they click resolve on the same side
+   * that rendered them (mixing would mis-route card callbacks). `guest` (anyone
+   * unlisted) is always `front` — strangers are never relayed to a worker.
+   */
+  run?: PolicyRunTarget;
+}
+
+export type PrincipalInput = string[] | PrincipalConfig;
+
+/**
+ * A named agent tool mode. `full` (built-in) = the unrestricted tool set. Any
+ * profile with a `tools` ARRAY is a restricted sandbox: built-ins are pinned to
+ * that array, discovery + shared memory default OFF, and a fail-closed
+ * `tool_call` hook blocks everything not explicitly allowed (built-ins in
+ * `tools` + the `commandTools` names + Feishu host tools when enabled).
+ */
+export interface ProfileConfig {
+  /**
+   * Built-in tool allowlist:
+   *   - `'all'` / omitted -> full built-ins, NO sandbox (only valid intent for
+   *     a trusted profile; equivalent to the built-in `full`).
+   *   - `string[]`        -> ONLY these built-ins (e.g. `['read','search']`).
+   *   - `[]`              -> zero built-ins (host/command tools only).
+   */
+  tools?: 'all' | string[];
+  /** CLIs exposed as host tools — a restricted profile's vetted escape hatch. */
+  commandTools?: CommandToolConfig[];
+  /** Expose the Feishu host tools. Default: `true` for full, `false` for restricted. */
+  feishuHostTools?: boolean;
+  /** Total tool calls per run across all tools (restricted only). 0/unset = no cap. */
+  maxToolCalls?: number;
+  /** System-prompt text PREPENDED to the user prompt for this profile. */
+  systemPrompt?: string;
+  /** OMP discovery sources (external MCP). Default: `on` for full, `off` for restricted. */
+  discovery?: 'on' | 'off';
+  /** Shared memory (retain/recall/reflect). Default: `on` for full, `off` for restricted. */
+  memory?: 'on' | 'off';
+  /**
+   * Paths to your OWN OMP extension `.mjs` files, passed via `--extension` for
+   * this profile — e.g. a custom `tool_call` hook that limits tools / call
+   * counts with logic richer than the auto-generated allowlist hook. Composable:
+   * they run IN ADDITION to the auto hook (when the profile is restricted), so
+   * you can keep the built-in allowlist and layer extra rules, OR keep `tools`
+   * unrestricted and do all limiting in your file. `~` expands to home; relative
+   * paths resolve against `~/.feishu-omp-bridge`. A missing file fails the run
+   * loudly (a limiter must never silently vanish).
+   */
+  extensions?: string[];
+}
+
+/** Match conditions for a rule. An omitted field matches anything. */
+export interface PolicyRuleMatch {
+  /** Scenario(s). Omit = any. A `group` entry also matches `topic`. */
+  chat?: PolicyScenario | PolicyScenario[];
+  /** Principal name(s), including the implicit `guest`. Omit = any. */
+  principal?: string | string[];
+  /** Restrict to specific chat_ids (group only — p2p ids are per-pair). */
+  chatId?: string[];
+}
+
+/** A first-match rule mapping a matched context to a profile. */
+export interface PolicyRule {
+  /** Conditions; omit entirely for an unconditional default/fallthrough rule. */
+  when?: PolicyRuleMatch;
+  /** Profile to apply: a key of `profiles`, or the built-in `full` / `locked`. */
+  profile: string;
+}
+
+export interface PolicyConfig {
+  /** Named identity groups. Reserved name `guest` is implicit (anyone unlisted). */
+  principals?: Record<string, PrincipalInput>;
+  /** Named tool modes. Built-in `full` and `locked` are always available. */
+  profiles?: Record<string, ProfileConfig>;
+  /** First-match rules. The FIRST matching rule wins; order matters. */
+  rules?: PolicyRule[];
+}
+
+/**
  * Top-level config shape on disk.
  *
  * `accounts` is a namespace for credential-flavored fields (currently just
@@ -281,6 +390,8 @@ export interface AppConfig {
   secrets?: SecretsConfig;
   preferences?: AppPreferences;
   relay?: RelayConfig;
+  /** Unified principals/profiles/rules. Absent = synthesized from legacy fields. */
+  policy?: PolicyConfig;
 }
 
 export function isComplete(cfg: Partial<AppConfig>): cfg is AppConfig {
@@ -491,12 +602,12 @@ function clampInt(v: unknown, def: number, lo: number, hi: number): number {
 }
 
 /**
- * Validated guest command-tool configs: drops entries with an invalid name
- * (must match /^[a-zA-Z0-9_]+$/) or empty command, dedupes by name, and
- * fills timeout/output defaults.
+ * Validate + normalize a raw `commandTools` array: drops entries with an
+ * invalid name (must match /^[a-zA-Z0-9_]+$/) or empty command, dedupes by
+ * name, and fills timeout/output defaults. Shared by the legacy `guestPolicy`
+ * accessor and the unified `ProfileConfig` resolver (policy.ts).
  */
-export function getGuestCommandTools(cfg: AppConfig): CommandToolConfig[] {
-  const raw: unknown = getGuestPolicy(cfg)?.commandTools;
+export function normalizeCommandTools(raw: unknown): CommandToolConfig[] {
   if (!Array.isArray(raw)) return [];
   const out: CommandToolConfig[] = [];
   const seen = new Set<string>();
@@ -524,6 +635,11 @@ export function getGuestCommandTools(cfg: AppConfig): CommandToolConfig[] {
     });
   }
   return out;
+}
+
+/** Validated guest command-tool configs (legacy `guestPolicy.commandTools`). */
+export function getGuestCommandTools(cfg: AppConfig): CommandToolConfig[] {
+  return normalizeCommandTools(getGuestPolicy(cfg)?.commandTools);
 }
 
 /**

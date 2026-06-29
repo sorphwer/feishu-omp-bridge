@@ -3,7 +3,8 @@ import type {
   CommentEvent,
   NormalizedMessage,
 } from '@larksuiteoapi/node-sdk';
-import { isRelayTrusted, type AppConfig } from '../config/schema';
+import type { AppConfig } from '../config/schema';
+import { relayRunTarget } from '../config/policy';
 import { log } from '../core/logger';
 import { naturalId, RELAY_PROTOCOL_VERSION, type RelayEvent, type RelayKind } from './protocol';
 
@@ -67,15 +68,15 @@ export function createRelayRouter(opts: RelayRouterOptions): RelayRouter {
 
   return {
     routeMessage(msg) {
-      if (!isRelayTrusted(cfg, msg.senderId)) return false;
+      if (relayRunTarget(cfg, msg.senderId) !== 'worker') return false;
       return dispatch('message', msg.chatId, msg);
     },
     routeCardAction(evt) {
-      if (!isRelayTrusted(cfg, evt.operator.openId)) return false;
+      if (relayRunTarget(cfg, evt.operator.openId) !== 'worker') return false;
       return dispatch('cardAction', evt.chatId, evt);
     },
     routeComment(evt) {
-      if (!isRelayTrusted(cfg, evt.operator.openId)) return false;
+      if (relayRunTarget(cfg, evt.operator.openId) !== 'worker') return false;
       return dispatch('comment', evt.fileToken, evt);
     },
   };

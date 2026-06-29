@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { guestHookSource, guestOverlayYaml } from './guest-lockdown';
+import { buildProfileRunArgs, profileHookSource, profileOverlayYaml } from './guest-lockdown';
 
-describe('guestOverlayYaml', () => {
+describe('profileOverlayYaml', () => {
   it('disables discovery sources so config-sourced MCP never loads', () => {
-    const yaml = guestOverlayYaml();
+    const yaml = profileOverlayYaml(false, false);
     expect(yaml).toContain('disabledProviders:');
     for (const src of ['native', 'claude', 'codex', 'gemini', 'github', 'opencode', 'cursor', 'agents-md']) {
       expect(yaml).toContain(`- ${src}`);
@@ -11,18 +11,32 @@ describe('guestOverlayYaml', () => {
     expect(yaml).toContain('discoveryMode: off');
   });
 
-  it('disables the shared memory backend for guests', () => {
-    const yaml = guestOverlayYaml();
+  it('disables the shared memory backend when memory is off', () => {
+    const yaml = profileOverlayYaml(false, false);
     expect(yaml).toContain('memory:');
     expect(yaml).toContain('backend: "off"');
   });
+
+  it('emits no overlay when both discovery and memory stay on', () => {
+    expect(profileOverlayYaml(true, true)).toBe('');
+  });
+
+  it('emits only the section that is turned off', () => {
+    const memoryOnly = profileOverlayYaml(true, false);
+    expect(memoryOnly).toContain('backend: "off"');
+    expect(memoryOnly).not.toContain('discoveryMode: off');
+
+    const discoveryOnly = profileOverlayYaml(false, true);
+    expect(discoveryOnly).toContain('discoveryMode: off');
+    expect(discoveryOnly).not.toContain('memory:');
+  });
 });
 
-describe('guestHookSource', () => {
+describe('profileHookSource', () => {
   const noLimits = { maxTotal: 0, perTool: {} };
 
   it('emits a fail-closed allowlist hook embedding the allowed tool names', () => {
-    const src = guestHookSource(['zendesk_kg', 'read'], noLimits);
+    const src = profileHookSource(['zendesk_kg', 'read'], noLimits);
     expect(src).toContain('const ALLOWED = new Set(["zendesk_kg","read"])');
     expect(src).toContain('pi.on("tool_call"');
     expect(src).toContain('block: true');
@@ -30,16 +44,39 @@ describe('guestHookSource', () => {
   });
 
   it('blocks everything when the allowlist is empty', () => {
-    const src = guestHookSource([], noLimits);
+    const src = profileHookSource([], noLimits);
     expect(src).toContain('const ALLOWED = new Set([])');
     expect(src).toContain('block: true');
   });
 
   it('bakes per-run total and per-tool call caps', () => {
-    const src = guestHookSource(['zendesk_kg'], { maxTotal: 12, perTool: { zendesk_kg: 8 } });
+    const src = profileHookSource(['zendesk_kg'], { maxTotal: 12, perTool: { zendesk_kg: 8 } });
     expect(src).toContain('const MAX_TOTAL = 12');
     expect(src).toContain('const PER_TOOL = {"zendesk_kg":8}');
     expect(src).toContain('total > MAX_TOTAL');
     expect(src).toContain('counts[name] > cap');
+  });
+});
+
+describe('buildProfileRunArgs', () => {
+  it('passes a plain full profile through with no run args', async () => {
+    const args = await buildProfileRunArgs({
+      name: 'full', restricted: false, builtinTools: [], commandTools: [],
+      feishuHostTools: true, discovery: true, memory: true, maxToolCalls: 0, extensions: [],
+    });
+    expect(args.tools).toBeUndefined();
+    expect(args.configOverlayPaths).toEqual([]);
+    expect(args.extensionPaths).toEqual([]);
+  });
+
+  it('appends a full profile’s custom extension hooks (no generated artifacts)', async () => {
+    const args = await buildProfileRunArgs({
+      name: 'fx', restricted: false, builtinTools: [], commandTools: [],
+      feishuHostTools: true, discovery: true, memory: true, maxToolCalls: 0,
+      extensions: ['/abs/custom-hook.mjs'],
+    });
+    expect(args.tools).toBeUndefined();
+    expect(args.configOverlayPaths).toEqual([]);
+    expect(args.extensionPaths).toEqual(['/abs/custom-hook.mjs']);
   });
 });

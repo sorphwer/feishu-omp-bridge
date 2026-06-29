@@ -15,6 +15,19 @@ export interface FeishuHostIntegration {
   uriSchemes: AgentHostUriScheme[];
 }
 
+/**
+ * Names of the Feishu host tools registered by {@link createFeishuHostIntegration}.
+ * The guest/profile sandbox hook (guest-lockdown.ts) must allowlist these when a
+ * restricted profile opts into `feishuHostTools`, otherwise the fail-closed
+ * `tool_call` hook would block the very host tools we just registered.
+ */
+export const FEISHU_HOST_TOOL_NAMES = [
+  'feishu_current_context',
+  'feishu_send_message',
+  'feishu_reply_message',
+  'feishu_get_message',
+] as const;
+
 export function createFeishuHostIntegration(
   channel: LarkChannel,
   ctx: FeishuHostContext,

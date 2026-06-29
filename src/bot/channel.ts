@@ -25,10 +25,6 @@ import { tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
 import {
   getAgentStopGraceMs,
-  getGuestCommandTools,
-  getGuestFeishuHostTools,
-  getGuestPolicy,
-  getGuestSystemPrompt,
   getOmpModel,
   getMaxConcurrentRuns,
   getMessageReplyMode,
@@ -37,9 +33,9 @@ import {
   getRelayConfig,
   getShowToolCalls,
   isChatAllowed,
-  isUnrestrictedUser,
   isUserAllowed,
 } from '../config/schema';
+import { resolveBatchProfile } from '../config/policy';
 import { resolveAppSecret, resolveRelaySecret } from '../config/secret-resolver';
 import { log, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
@@ -49,7 +45,7 @@ import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { handleCommentMention } from './comments';
 import { buildCommandTools } from './command-tools';
-import { buildGuestRunArgs, type GuestRunArgs } from './guest-lockdown';
+import { buildProfileRunArgs, type GuestRunArgs } from './guest-lockdown';
 import { createFeishuHostIntegration } from './feishu-host';
 import { expandInteractiveCard } from './interactive-card';
 import { startKeepalive } from './keepalive';
@@ -274,7 +270,7 @@ export function createBridgeRuntime(deps: BridgeRuntimeDeps): BridgeRuntime {
         pending,
         chatModeCache,
       }),
-    dispatchComment: (evt) => handleCommentMention({ channel, evt, agent, sessions, workspaces }),
+    dispatchComment: (evt) => handleCommentMention({ channel, evt, agent, sessions, workspaces, cfg: controls.cfg }),
     shutdown: async () => {
       pending.cancelAll();
       await activeRuns.stopAll();
@@ -726,46 +722,47 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cwd,
   });
 
-  // Tool sandbox scope:
-  //   • Groups / topics: ALWAYS sandboxed — even the operator. Group chats are
-  //     shared spaces, so the bot is always the locked "guest" persona there.
-  //   • DMs (p2p): trust-based — the operator gets full tools, everyone else is
-  //     sandboxed.
-  // Gated on guestPolicy being configured; fail-closed on missing senderId.
-  const policyActive = getGuestPolicy(controls.cfg) !== undefined;
-  const isP2p = firstMsg.chatType === 'p2p';
-  const allTrusted = batch.every((m) => Boolean(m.senderId) && isUnrestrictedUser(controls.cfg, m.senderId));
-  const sandboxGuest = policyActive && !(isP2p && allTrusted);
+  // Resolve the agent profile for this batch from the unified policy
+  // (principals × scenario × first-match rules). The most-restrictive sender
+  // wins, so one untrusted sender can't lift the batch. A profile with a
+  // `tools` ARRAY is a sandbox (restricted built-ins + discovery/memory off +
+  // fail-closed hook); `full` keeps the whole tool set. Absent `policy`, this
+  // reproduces the legacy access/guest matrix. See config/policy.ts.
+  const { profile, principals } = resolveBatchProfile(
+    controls.cfg,
+    batch.map((m) => m.senderId),
+    { chat: mode, chatId },
+  );
 
-  let guestArgs: GuestRunArgs | undefined;
-  let hostTools = feishuHost.tools;
-  let hostUriSchemes = feishuHost.uriSchemes;
+  // Host-tool surface follows the profile for EVERY profile (not just
+  // restricted): Feishu host tools only when `feishuHostTools` is on, plus any
+  // command tools the profile declares. The `feishu://` scheme can read
+  // arbitrary messages by id, so it rides the same flag. `buildProfileRunArgs`
+  // emits `--tools`/hook only for restricted profiles and the discovery/memory
+  // overlay whenever the profile turns either off (so a `full` profile's
+  // discovery/memory/feishu knobs are never silently ignored).
+  const guestArgs: GuestRunArgs = await buildProfileRunArgs(profile);
+  const commandTools = buildCommandTools(profile.commandTools, cwd);
+  const hostTools = profile.feishuHostTools
+    ? [...feishuHost.tools, ...commandTools]
+    : commandTools;
+  const hostUriSchemes = profile.feishuHostTools ? feishuHost.uriSchemes : [];
   let runPrompt = prompt;
-  if (sandboxGuest) {
-    guestArgs = await buildGuestRunArgs(controls.cfg);
-    const guestFeishuTools = getGuestFeishuHostTools(controls.cfg);
-    const commandTools = buildCommandTools(getGuestCommandTools(controls.cfg), cwd);
-    hostTools = guestFeishuTools ? [...feishuHost.tools, ...commandTools] : commandTools;
-    // The feishu:// scheme can read arbitrary messages by id — drop it for
-    // guests unless feishu host tools are explicitly allowed.
-    hostUriSchemes = guestFeishuTools ? feishuHost.uriSchemes : [];
-    // Guest system prompt is PREPENDED to the user prompt (same proven path as
-    // OMP_BRIDGE_PROMPT). NOT via `--append-system-prompt`: appending an extra
-    // system block destabilizes the codex (gpt-5.5) request and intermittently
-    // hangs the run with no output — observed as "guest gets no reply".
-    const guestPrompt = getGuestSystemPrompt(controls.cfg);
-    if (guestPrompt) runPrompt = `${guestPrompt}\n\n---\n\n${prompt}`;
-    const guestSender = batch.find((m) => !Boolean(m.senderId) || !isUnrestrictedUser(controls.cfg, m.senderId));
-    const logSender = guestSender?.senderId ?? firstMsg.senderId ?? '';
-    log.info('guest', 'sandboxed-run', {
-      scope,
-      chatType: firstMsg.chatType,
-      sender: logSender ? logSender.slice(-6) : '(unknown)',
-      tools: guestArgs.tools,
-      hostToolCount: hostTools.length,
-      systemPrompt: Boolean(guestPrompt),
-    });
-  }
+  // Profile system prompt is PREPENDED to the user prompt (same proven path as
+  // OMP_BRIDGE_PROMPT). NOT via `--append-system-prompt`: appending an extra
+  // system block destabilizes the codex (gpt-5.5) request and intermittently
+  // hangs the run with no output — observed as "guest gets no reply".
+  if (profile.systemPrompt) runPrompt = `${profile.systemPrompt}\n\n---\n\n${prompt}`;
+  log.info('policy', 'resolved', {
+    scope,
+    chat: mode,
+    principals,
+    profile: profile.name,
+    restricted: profile.restricted,
+    tools: guestArgs?.tools,
+    hostToolCount: hostTools.length,
+    systemPrompt: Boolean(profile.systemPrompt),
+  });
 
   const run = agent.run({
     prompt: runPrompt,
