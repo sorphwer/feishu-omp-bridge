@@ -1,6 +1,6 @@
 # 09 · 访问控制与统一策略（principals / profiles / rules）
 
-> 文档基线：commit `a5d981c`（dirty/WIP；此后引入 `src/config/policy.ts` 统一 policy 重构，相关章节待对齐——详见 [README](./README.md)）。
+> 源码基线：commit `78460f6`（文档对应的源码 commit；详见 [README](./README.md)）。
 
 > 覆盖范围：访问控制语义（allowedUsers/allowedChats/admins）；**统一策略模型**（`config/policy.ts` 的 principals×profiles×rules、`resolvePolicy`/`resolveBatchProfile`/`relayRunTarget`、`synthesizeLegacyPolicy` 向后兼容合成、fail-closed 默认）；profile 的应用（`runAgentBatch`、评论、卡片回调）；`guest-lockdown.ts` 的三层封锁、`buildProfileRunArgs`、按 profile 内容签名的产物目录；`command-tools.ts` 的 `buildCommandTools`。
 >

@@ -1,6 +1,6 @@
 # 08 · 配置与密钥
 
-> 文档基线：commit `a5d981c`（dirty/WIP；此后引入 `src/config/policy.ts` 统一 policy 重构，相关章节待对齐——详见 [README](./README.md)）。
+> 源码基线：commit `78460f6`（文档对应的源码 commit；详见 [README](./README.md)）。
 
 > 覆盖范围：`config/schema.ts` 的完整 `AppConfig` 层级（含每个 preference 字段、默认值、clamp）与所有访问器；`config/store.ts`（原子写、加密账户配置、secrets-getter 包装脚本）；`config/paths.ts`（全部路径 + `legacyPaths`）；`config/secret-resolver.ts`（plain→template→env→file→exec 五段管线、self-bridge 短路、provider 级联）；`config/keystore.ts`（AES-256-GCM、PBKDF2-SHA256 10 万次、host 派生种子 + 盐文件、`secrets.enc` 形状）。
 >
