@@ -276,7 +276,9 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
 - `admins` 空或未设置：所有允许用户都可执行管理员命令。
 - 管理员命令包括：`/account`、`/config`、`/switch`、`/exit`、`/reconnect`、`/doctor`、`/cd`、`/ws`。
 
-### 访客工具沙箱（`preferences.guestPolicy`）
+### 访客工具沙箱（`preferences.guestPolicy`，旧字段）
+
+> 旧字段，**仍可用**（无 `policy` 时自动合成等价策略）。新部署推荐用统一 [`policy`](#统一策略policy进阶)（按场景/身份选 profile、多 profile、自定义 hook、front/worker），完整配方见 [配置指南 CONFIGURATION.zh.md](./CONFIGURATION.zh.md)。
 
 对**非信任发送者**(例如陌生人私聊 bot)限制 agent 能用的工具,信任用户(你自己)不受任何影响、保留全部工具。
 
@@ -550,7 +552,7 @@ feishu://message/<message_id>
   - `preferences.access.allowedChats`
   - `preferences.access.admins`
   - `ompTools` 工具白名单（全局，对所有人生效）
-  - `preferences.guestPolicy` 访客工具沙箱（仅约束非信任发送者，见上文）
+  - `policy` 统一访问策略（principals/profiles/rules；推荐）或旧 `preferences.guestPolicy` 访客沙箱，见 [配置指南](./CONFIGURATION.zh.md)
   - 固定工作目录 / 命名工作空间
 - 群聊默认必须 `@bot` 才响应，避免无意触发。
 - `@全员` 不会触发响应。
