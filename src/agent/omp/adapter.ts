@@ -248,6 +248,14 @@ export class OmpAdapter implements AgentAdapter {
   }
 }
 
+/**
+ * Grace after the child exits before force-closing the stdout line reader.
+ * Lets any buffered final lines flush, then unblocks `createEventStream` so it
+ * yields a terminal event instead of hanging on a stdout pipe that never EOFs
+ * (seen on fast startup failures like resuming a missing session).
+ */
+const EXIT_DRAIN_GRACE_MS = 250;
+
 async function* createEventStream(
   child: OmpChild,
   stderrChunks: Buffer[],
@@ -264,6 +272,17 @@ async function* createEventStream(
   }
 
   const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  // Safety net: if omp exits before its stdout pipe cleanly EOFs (e.g. a fast
+  // startup failure such as `--resume` of a session omp no longer has), the
+  // `for await (const line of rl)` below would never terminate and the
+  // consumer would hang until its idle watchdog fires minutes later. Force the
+  // reader closed shortly after the child exits so we fall through to the
+  // exit/error handling and emit a terminal event promptly.
+  const closeReaderAfterExit = (): void => {
+    setTimeout(() => rl.close(), EXIT_DRAIN_GRACE_MS).unref();
+  };
+  if (child.exitCode !== null || child.signalCode !== null) closeReaderAfterExit();
+  else child.once('exit', closeReaderAfterExit);
   let terminal = false;
   let sawReady = false;
   let promptSent = false;
@@ -391,6 +410,18 @@ function waitForExitWithin(child: OmpChild, timeoutMs: number): Promise<boolean>
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Matches the failure omp reports when asked to `--resume` a session it no
+ * longer has (prior run crashed before persisting, or the session store was
+ * pruned). It surfaces inside an `error` AgentEvent as the relayed stderr,
+ * e.g. `omp exited with code 1: Error: Session "..." not found.`. The bridge
+ * uses this to clear the stale session and retry with a fresh one.
+ */
+const SESSION_MISSING_RE = /session\b[\s\S]*\bnot found/i;
+export function isSessionMissingError(message: string | undefined): boolean {
+  return message !== undefined && SESSION_MISSING_RE.test(message);
 }
 interface HostToolCallFrame {
   type: 'host_tool_call';

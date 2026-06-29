@@ -8,6 +8,7 @@ import type {
 } from '@larksuiteoapi/node-sdk';
 import { Domain, LoggerLevel, createLarkChannel } from '@larksuiteoapi/node-sdk';
 import type { AgentAdapter, AgentUiRequest } from '../agent/types';
+import { isSessionMissingError } from '../agent/omp/adapter';
 import { handleCardAction } from '../card/dispatcher';
 import { sendManagedCard, updateManagedCard } from '../card/managed';
 import { renderOmpUiRequestCard, renderOmpUiResultCard } from '../card/omp-ui';
@@ -772,20 +773,23 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     systemPrompt: Boolean(profile.systemPrompt),
   });
 
-  const run = agent.run({
-    prompt: runPrompt,
-    sessionId: resumeFrom,
-    cwd,
-    model: getOmpModel(controls.cfg),
-    imagePaths,
-    stopGraceMs: getAgentStopGraceMs(controls.cfg),
-    hostTools,
-    hostUriSchemes,
-    tools: guestArgs?.tools,
-    configOverlayPaths: guestArgs?.configOverlayPaths,
-    extensionPaths: guestArgs?.extensionPaths,
-  });
-  const handle = activeRuns.register(scope, run);
+  const spawnHandle = (sessionId: string | undefined): RunHandle =>
+    activeRuns.register(
+      scope,
+      agent.run({
+        prompt: runPrompt,
+        sessionId,
+        cwd,
+        model: getOmpModel(controls.cfg),
+        imagePaths,
+        stopGraceMs: getAgentStopGraceMs(controls.cfg),
+        hostTools,
+        hostUriSchemes,
+        tools: guestArgs?.tools,
+        configOverlayPaths: guestArgs?.configOverlayPaths,
+        extensionPaths: guestArgs?.extensionPaths,
+      }),
+    );
 
   // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
   // over global default (preferences). 0 / undefined = no watchdog.
@@ -845,6 +849,30 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     },
   };
 
+  // Run the agent into `flush`. If omp aborts because the session we asked it
+  // to resume no longer exists, clear the stored session and retry ONCE with a
+  // fresh session into the same card — so a stale/pruned session self-heals
+  // instead of leaving the chat stuck on every subsequent message.
+  const driveAgent = async (flush: (state: RunState) => Promise<void>): Promise<void> => {
+    let handle = spawnHandle(resumeFrom);
+    try {
+      const { sessionNotFound } = await processAgentStream(
+        handle, sessions, scope, cwd, idleTimeoutMs, resumeFrom !== undefined, flush, uiHooks,
+      );
+      if (sessionNotFound && resumeFrom) {
+        log.warn('session', 'resume-miss-retry', { sessionId: resumeFrom });
+        sessions.clear(scope);
+        activeRuns.unregister(scope, handle.run);
+        handle = spawnHandle(undefined);
+        // Fresh retry: not recoverable, so a (very unlikely) repeat error
+        // renders normally and the card always reaches a terminal state.
+        await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, false, flush, uiHooks);
+      }
+    } finally {
+      activeRuns.unregister(scope, handle.run);
+    }
+  };
+
   // For non-card modes OMP's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
   // Add a "Typing" reaction to the triggering message as an instant ack;
@@ -861,9 +889,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           card: {
             initial: renderCard(initialState),
             producer: async (ctrl) => {
-              await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
+              await driveAgent(async (state) => {
                 await ctrl.update(renderCard(filterForPrefs(state)));
-              }, uiHooks);
+              });
             },
           },
         },
@@ -874,9 +902,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         chatId,
         {
           markdown: async (ctrl) => {
-            await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
+            await driveAgent(async (state) => {
               await ctrl.setContent(renderText(filterForPrefs(state)));
-            }, uiHooks);
+            });
           },
         },
         sendOpts,
@@ -886,9 +914,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // the run, then post the final rendered text once as a plain markdown
       // (msg_type=post) message — no card, no streaming, no typewriter.
       let finalState: RunState = initialState;
-      await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, async (state) => {
+      await driveAgent(async (state) => {
         finalState = state;
-      }, uiHooks);
+      });
       const body = renderText(filterForPrefs(finalState));
       if (body.trim()) {
         await channel.send(chatId, { markdown: body }, sendOpts);
@@ -897,7 +925,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } catch (err) {
     log.fail('stream', err);
   } finally {
-    activeRuns.unregister(scope, run);
     if (reactionId) {
       await removeReaction(channel, lastMsg.messageId, reactionId);
     }
@@ -915,10 +942,19 @@ async function processAgentStream(
   scope: string,
   cwd: string,
   idleTimeoutMs: number | undefined,
+  // Only the first, resumed attempt may swallow a "session not found" abort for
+  // the caller to retry fresh. A fresh attempt renders the error normally so it
+  // can never leave the card stuck non-terminal.
+  recoverSessionMiss: boolean,
   flush: (state: RunState) => Promise<void>,
   hooks?: AgentStreamHooks,
-): Promise<void> {
+): Promise<{ sessionNotFound: boolean }> {
   let state: RunState = initialState;
+  // Set when omp aborts because the session we asked it to --resume is gone.
+  // The caller clears the stored session and retries with a fresh one; we do
+  // NOT reduce this into a terminal error so the retry can continue into the
+  // same card without a flash of "error".
+  let sessionNotFound = false;
 
   // Idle watchdog: OMP going silent for `idleTimeoutMs` is treated as
   // "presumed hung", we stop() and surface a timeout marker on the card.
@@ -997,6 +1033,12 @@ async function processAgentStream(
         await hooks?.onUiCancel(evt.targetId);
       }
 
+      if (recoverSessionMiss && evt.type === 'error' && isSessionMissingError(evt.message)) {
+        sessionNotFound = true;
+        log.warn('session', 'resume-missing', { scope });
+        break;
+      }
+
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
       state = reduce(state, evt);
@@ -1014,6 +1056,14 @@ async function processAgentStream(
     if (timer) clearTimeout(timer);
   }
 
+  // Recoverable resume-miss: leave the card non-terminal — the caller clears
+  // the stored session and retries with a fresh one into the same card — but
+  // still reap the dead child here.
+  if (sessionNotFound) {
+    await reapRun(handle);
+    return { sessionNotFound: true };
+  }
+
   // If state already reached a terminal event (done/error/etc.) before the
   // watchdog or interrupt could land, don't clobber it — that real terminal
   // wins. This avoids "OMP finished but flush was slow → timer fired
@@ -1029,12 +1079,18 @@ async function processAgentStream(
   }
   log.info('card', 'final', { terminal: state.terminal, interrupted: handle.interrupted });
   await flush(state);
-    // Reap the subprocess. Two regimes:
-  //  - Interrupted (user /stop, idle watchdog, disconnect): stop() was already
-  //    fire-and-forgotten by whoever set handle.interrupted; this awaits it.
-  //  - Natural done: agent_end can arrive before OMP has fully closed stdout.
-  //    Wait it out so the run exits with
-  //    code 0; only SIGTERM as a hung-process safety net.
+  await reapRun(handle);
+  return { sessionNotFound: false };
+}
+
+/**
+ * Reap the agent subprocess after a run ends. Two regimes:
+ *  - Interrupted (user /stop, idle watchdog, disconnect): stop() was already
+ *    fire-and-forgotten by whoever set handle.interrupted; this awaits it.
+ *  - Natural done: agent_end can arrive before OMP has fully closed stdout.
+ *    Wait it out so the run exits with code 0; only SIGTERM as a safety net.
+ */
+async function reapRun(handle: RunHandle): Promise<void> {
   if (handle.interrupted) {
     await handle.run.stop();
   } else {
