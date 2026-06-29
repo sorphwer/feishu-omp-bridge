@@ -91,11 +91,12 @@ feishu-omp-bridge unregister            删除 daemon 注册文件
 | `/new chat [name]` | 新建群并拉你进去，继承当前 cwd。 |
 | `/cd <path>` | 切换当前 chat / topic 的工作目录；会重置 session。支持 `~/xxx`。 |
 | `/ws list` | 查看命名工作空间。 |
-| `/ws add <name> <path>` | 保存命名工作空间。 |
+| `/ws save <name>` | 把当前 cwd 保存为命名工作空间。 |
 | `/ws use <name>` | 切换到命名工作空间并重置 session。 |
+| `/ws remove\|rm <name>` | 删除命名工作空间。 |
 | `/config` | 打开偏好设置卡片。 |
 | `/switch` | 弹卡片切换 OMP 模型：下拉列常用（role）模型，或输入框直接输入任意模型名（OMP 模糊匹配）。当前模型来自 `omp config modelRoles`，✅ 标已认证。写入 preferences.ompModel，立即生效，全局。 |
-| `/account` | 更换 bot app 凭据并重连。 |
+| `/account`、`/account change` | 裸 `/account` 查看当前应用；`/account change` 更换 appId / secret 并重连。 |
 | `/status` | 查看当前 scope、cwd、session、agent。 |
 | `/stop` | 终止当前正在跑的 OMP 任务。 |
 | `/timeout [N|off|default]` | 设置当前 session 的 idle 探活分钟数，或关闭 / 恢复全局默认。 |

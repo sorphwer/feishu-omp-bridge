@@ -194,6 +194,17 @@ node bin/feishu-omp-bridge.mjs ps
 node bin/feishu-omp-bridge.mjs kill <id|#>
 ```
 
+### 密钥管理（`secrets`）
+
+bridge 加密 keystore 的子命令（落盘在 `~/.feishu-omp-bridge/secrets.enc`）：
+
+```bash
+node bin/feishu-omp-bridge.mjs secrets set --app-id cli_xxxx    # 输入并加密存储 App Secret（不回显）
+node bin/feishu-omp-bridge.mjs secrets list                     # 列出 keystore 条目 id（不显示明文）
+node bin/feishu-omp-bridge.mjs secrets remove --app-id cli_xxxx # 删除一个条目
+node bin/feishu-omp-bridge.mjs secrets get                      # exec-provider 协议：stdin 读 JSON 请求、stdout 写响应（由 lark-cli 调用，一般无需手动运行）
+```
+
 ## 配置文件
 
 默认配置路径：
@@ -444,27 +455,28 @@ node bin/feishu-omp-bridge.mjs kill <id|#>
 
 ## 飞书聊天命令
 
-| 命令 | 作用 |
-| --- | --- |
-| `/new`、`/reset` | 清空当前 chat/topic 的 OMP session，下一条消息新建会话。 |
-| `/new chat [name]` | 创建新群并拉你进去，继承当前 cwd。需要 bot 具备 `im:chat` 权限。 |
-| `/cd <path>` | 切换当前 chat/topic 的工作目录；会重置 session。支持 `~/xxx`。 |
-| `/ws list` | 查看命名工作空间。 |
-| `/ws add <name> <path>` | 保存当前 cwd 为命名工作空间。 |
-| `/ws use <name>` | 切换到命名工作空间并重置 session。 |
-| `/config` | 打开偏好设置卡片。 |
-| `/switch` | 弹卡片切换 OMP 模型：下拉列常用（role）模型，或输入框直接输入任意模型名（OMP 模糊匹配）。当前模型来自 `omp config modelRoles`，✅ 标已认证。写入 preferences.ompModel，立即生效，全局。 |
-| `/account` | 更换 bot app 凭据并重连。 |
-| `/status` | 查看当前 scope、cwd、session、agent。 |
-| `/stop` | 终止当前正在执行的 OMP run。 |
-| `/timeout [N|off|default]` | 设置当前 session 的 idle timeout，或关闭 / 恢复全局默认。 |
-| `/ps` | 列出本机所有 bridge 进程，并标识当前回复进程。 |
-| `/exit <id|#>` | 关闭指定 bridge 进程。 |
-| `/reconnect` | 强制重连 WebSocket。 |
-| `/doctor [描述]` | 把最近日志和故障描述交给 OMP 自助诊断。 |
-| `/help` | 显示帮助卡片。 |
+| 命令 | 作用 | 管理员 |
+| --- | --- | --- |
+| `/new`、`/reset` | 清空当前 chat/topic 的 OMP session，下一条消息新建会话。 | |
+| `/new chat [name]` | 创建新群并拉你进去，继承当前 cwd。需要 bot 具备 `im:chat` 权限。 | |
+| `/status` | 查看当前 scope、cwd、session、agent。 | |
+| `/stop` | 终止当前正在执行的 OMP run。 | |
+| `/timeout [N\|off\|default]` | 设置当前 session 的 idle timeout，或关闭 / 恢复全局默认。 | |
+| `/ps` | 列出本机所有 bridge 进程，并标识当前回复进程。 | |
+| `/help` | 显示帮助卡片。 | |
+| `/cd <path>` | 切换当前 chat/topic 的工作目录；会重置 session。支持 `~/xxx`。 | 🔒 |
+| `/ws list`（或裸 `/ws`） | 查看命名工作空间与当前 cwd。 | 🔒 |
+| `/ws save <name>` | 把当前 cwd 保存为命名工作空间。 | 🔒 |
+| `/ws use <name>` | 切换到命名工作空间并重置 session。 | 🔒 |
+| `/ws remove\|rm <name>` | 删除命名工作空间。 | 🔒 |
+| `/config` | 打开偏好设置卡片。 | 🔒 |
+| `/switch` | 弹卡片切换 OMP 模型：下拉列常用（role）模型，或输入框直接输入任意模型名（OMP 模糊匹配）。当前模型来自 `omp config modelRoles`，✅ 标已认证。写入 preferences.ompModel，立即生效，全局。 | 🔒 |
+| `/account`、`/account change` | 裸 `/account` 查看当前应用；`/account change` 更换 appId / secret 并重连。 | 🔒 |
+| `/exit <id\|#>` | 关闭指定 bridge 进程。 | 🔒 |
+| `/reconnect` | 热重连飞书长连接（不重建 OMP adapter）。 | 🔒 |
+| `/doctor [描述]` | 把最近日志和故障描述交给 OMP 自助诊断；群 / 话题里结果私信发给操作者。 | 🔒 |
 
-普通消息会直接交给 OMP。群聊默认需要 `@bot`；私聊不需要。
+🔒 命令受 [访问控制](#访问控制) 的 `admins` 名单限制；`admins` 为空时所有允许用户都可执行。普通消息会直接交给 OMP，群聊默认需要 `@bot`，私聊不需要。
 
 ## 飞书卡片回调
 
