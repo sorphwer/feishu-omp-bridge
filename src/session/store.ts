@@ -3,20 +3,30 @@ import { dirname } from 'node:path';
 import { paths } from '../config/paths';
 import { log } from '../core/logger';
 
-export interface SessionEntry {
-  /** May be absent if the entry was created by /timeout before any run
-   * recorded a session id. Treat absence as "no resumable session". */
-  sessionId?: string;
-  /** Pinned cwd for the resumable session. Absent for the same reason. */
-  cwd?: string;
+/** A resumable OMP session for one (scope, profile) pair. */
+export interface ProfileSession {
+  sessionId: string;
+  /** Pinned cwd — OMP can only resume a session from the cwd it was created in. */
+  cwd: string;
   updatedAt: number;
-  /** Per-scope idle-timeout override (minutes). 0 = explicitly off for this
-   * scope, undefined = follow global default. /new clears the whole entry,
-   * so this resets to "follow global" when the user starts a new session. */
-  idleTimeoutMinutes?: number;
 }
 
-type SessionMap = Record<string, SessionEntry>;
+export interface ScopeEntry {
+  /**
+   * Resumable OMP sessions for this scope, keyed by the PROFILE NAME that
+   * created them. Sessions are profile-scoped so a lower-privilege run never
+   * resumes (and inherits the conversation context of) a higher-privilege
+   * session in the same chat — and each tier keeps its own thread.
+   */
+  sessions: Record<string, ProfileSession>;
+  /** Per-scope idle-timeout override (minutes). 0 = explicitly off for this
+   * scope, undefined = follow global default. Scope-level (not per-profile):
+   * /new clears the whole entry, resetting this to "follow global". */
+  idleTimeoutMinutes?: number;
+  updatedAt: number;
+}
+
+type SessionMap = Record<string, ScopeEntry>;
 
 export class SessionStore {
   private data: SessionMap = {};
@@ -30,27 +40,11 @@ export class SessionStore {
   async load(): Promise<void> {
     try {
       const text = await readFile(this.path, 'utf8');
-      const raw = JSON.parse(text) as Record<string, Partial<SessionEntry>>;
+      const raw = JSON.parse(text) as Record<string, unknown>;
       this.data = {};
-      for (const [chatId, entry] of Object.entries(raw)) {
-        if (!entry || typeof entry.updatedAt !== 'number') continue;
-        // Drop entries without a `cwd`/`sessionId` pair *unless* there's
-        // some other persisted state worth keeping (e.g. an idle-timeout
-        // override). Resuming a session whose cwd we don't know about
-        // would make OMP resume fail, so resume keys still need
-        // the full pair; but a bare timeout override is fine on its own.
-        const sessionId = typeof entry.sessionId === 'string' ? entry.sessionId : undefined;
-        const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
-        const idleTimeoutMinutes =
-          typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
-        const hasSession = sessionId !== undefined && cwd !== undefined;
-        if (!hasSession && idleTimeoutMinutes === undefined) continue;
-        this.data[chatId] = {
-          ...(sessionId !== undefined ? { sessionId } : {}),
-          ...(cwd !== undefined ? { cwd } : {}),
-          updatedAt: entry.updatedAt,
-          ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
-        };
+      for (const [scope, value] of Object.entries(raw)) {
+        const entry = this.migrateEntry(value);
+        if (entry) this.data[scope] = entry;
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
@@ -59,52 +53,114 @@ export class SessionStore {
   }
 
   /**
-   * Return the session id for this chat if it was created in the given cwd.
-   * Sessions recorded in a different cwd are stale — OMP can't resume
-   * them from a different working directory.
+   * Normalize a persisted entry into the current nested shape. Tolerates the
+   * legacy FLAT shape (`{ sessionId, cwd, updatedAt, idleTimeoutMinutes? }`):
+   * the flat session is DROPPED (its creating profile is unknown, and resuming
+   * it under the wrong profile would leak context) while a bare idle-timeout
+   * override is preserved. Returns undefined when nothing worth keeping remains.
    */
-  resumeFor(chatId: string, cwd: string): string | undefined {
-    const entry = this.data[chatId];
+  private migrateEntry(value: unknown): ScopeEntry | undefined {
+    if (!value || typeof value !== 'object') return undefined;
+    const v = value as Record<string, unknown>;
+    const updatedAt = typeof v.updatedAt === 'number' ? v.updatedAt : undefined;
+    if (updatedAt === undefined) return undefined;
+    const idleTimeoutMinutes =
+      typeof v.idleTimeoutMinutes === 'number' ? v.idleTimeoutMinutes : undefined;
+
+    const sessions: Record<string, ProfileSession> = {};
+    if (v.sessions && typeof v.sessions === 'object') {
+      for (const [profile, raw] of Object.entries(v.sessions as Record<string, unknown>)) {
+        if (!raw || typeof raw !== 'object') continue;
+        const s = raw as Record<string, unknown>;
+        if (typeof s.sessionId !== 'string' || typeof s.cwd !== 'string') continue;
+        sessions[profile] = {
+          sessionId: s.sessionId,
+          cwd: s.cwd,
+          updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : updatedAt,
+        };
+      }
+    }
+    // Legacy flat entry: a session with no known profile — drop it (fail-safe),
+    // but keep the idle override if present.
+    const hasSessions = Object.keys(sessions).length > 0;
+    if (!hasSessions && idleTimeoutMinutes === undefined) return undefined;
+    return {
+      sessions,
+      ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+      updatedAt,
+    };
+  }
+
+  /**
+   * Return the session id for this (scope, profile) pair if it was created in
+   * the given cwd. A different profile, a different cwd, or no session at all
+   * all yield undefined (= start fresh). Profile-scoping is the second half of
+   * the privilege boundary: a restricted run can never resume a `full` thread.
+   */
+  resumeFor(scope: string, cwd: string, profile: string): string | undefined {
+    const session = this.data[scope]?.sessions[profile];
+    if (!session) return undefined;
+    if (session.cwd !== cwd) return undefined;
+    return session.sessionId;
+  }
+
+  /** The most-recently-updated session in a scope (across profiles), for the
+   * /status card. undefined when the scope has no resumable session. */
+  latestSession(scope: string): { sessionId: string; cwd: string; profile: string } | undefined {
+    const entry = this.data[scope];
     if (!entry) return undefined;
-    if (entry.cwd !== cwd) return undefined;
-    return entry.sessionId;
+    let best: { sessionId: string; cwd: string; profile: string; updatedAt: number } | undefined;
+    for (const [profile, s] of Object.entries(entry.sessions)) {
+      if (!best || s.updatedAt > best.updatedAt) {
+        best = { sessionId: s.sessionId, cwd: s.cwd, profile, updatedAt: s.updatedAt };
+      }
+    }
+    return best ? { sessionId: best.sessionId, cwd: best.cwd, profile: best.profile } : undefined;
   }
 
-  getRaw(chatId: string): SessionEntry | undefined {
-    return this.data[chatId];
-  }
-
-  set(chatId: string, sessionId: string, cwd: string): void {
-    // Preserve idleTimeoutMinutes across run starts — it's a per-scope
-    // preference, not per-run-instance state. /new (clear) wipes it.
-    const prev = this.data[chatId];
-    this.data[chatId] = {
-      sessionId,
-      cwd,
-      updatedAt: Date.now(),
+  set(scope: string, sessionId: string, cwd: string, profile: string): void {
+    const prev = this.data[scope];
+    const now = Date.now();
+    this.data[scope] = {
+      // Preserve sibling profiles' sessions and the scope idle override.
+      sessions: { ...(prev?.sessions ?? {}), [profile]: { sessionId, cwd, updatedAt: now } },
       ...(prev?.idleTimeoutMinutes !== undefined
         ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
         : {}),
+      updatedAt: now,
     };
     this.schedulePersist();
   }
 
-  clear(chatId: string): void {
-    if (!(chatId in this.data)) return;
-    delete this.data[chatId];
+  /** Drop the WHOLE scope (all profiles' sessions + idle override). Used by
+   * /new, /cd, /ws — "fresh start for this chat" wipes every tier's thread. */
+  clear(scope: string): void {
+    if (!(scope in this.data)) return;
+    delete this.data[scope];
+    this.schedulePersist();
+  }
+
+  /** Drop only ONE profile's session in a scope (keep siblings + idle override).
+   * Used by the resume-miss retry so a stale/expired session for one tier can
+   * self-heal without wiping every other tier's thread. */
+  clearProfile(scope: string, profile: string): void {
+    const entry = this.data[scope];
+    if (!entry || !(profile in entry.sessions)) return;
+    delete entry.sessions[profile];
+    entry.updatedAt = Date.now();
     this.schedulePersist();
   }
 
   /** Per-scope idle-timeout override. `undefined` means no override set. */
-  getIdleTimeoutMinutes(chatId: string): number | undefined {
-    return this.data[chatId]?.idleTimeoutMinutes;
+  getIdleTimeoutMinutes(scope: string): number | undefined {
+    return this.data[scope]?.idleTimeoutMinutes;
   }
 
-  setIdleTimeoutMinutes(chatId: string, minutes: number): void {
+  setIdleTimeoutMinutes(scope: string, minutes: number): void {
     const clamped = Math.min(Math.max(Math.floor(minutes), 0), 120);
-    const prev = this.data[chatId];
-    this.data[chatId] = {
-      ...(prev ?? { updatedAt: Date.now() }),
+    const prev = this.data[scope];
+    this.data[scope] = {
+      sessions: prev?.sessions ?? {},
       idleTimeoutMinutes: clamped,
       updatedAt: Date.now(),
     };
@@ -113,11 +169,11 @@ export class SessionStore {
 
   /** Remove the override so this scope falls back to the global default.
    * Returns true if something was actually removed. */
-  clearIdleTimeoutOverride(chatId: string): boolean {
-    const prev = this.data[chatId];
+  clearIdleTimeoutOverride(scope: string): boolean {
+    const prev = this.data[scope];
     if (!prev || prev.idleTimeoutMinutes === undefined) return false;
     const { idleTimeoutMinutes: _, ...rest } = prev;
-    this.data[chatId] = { ...rest, updatedAt: Date.now() };
+    this.data[scope] = { ...rest, updatedAt: Date.now() };
     this.schedulePersist();
     return true;
   }

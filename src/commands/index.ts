@@ -353,7 +353,7 @@ async function handleWsRemove(name: string, ctx: CommandContext): Promise<void> 
 
 async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
   const cwd = ctx.workspaces.cwdFor(ctx.scope) ?? homedir();
-  const sess = ctx.sessions.getRaw(ctx.scope);
+  const sess = ctx.sessions.latestSession(ctx.scope);
   const card = statusCard({
     cwd,
     sessionId: sess?.sessionId,
@@ -598,7 +598,8 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
     cwd: homedir(),
     stopGraceMs: getAgentStopGraceMs(ctx.controls.cfg),
   });
-  const handle = ctx.activeRuns.register(ctx.scope, run);
+  // /doctor is admin-only and runs unrestricted, so it registers under `full`.
+  const handle = ctx.activeRuns.register(ctx.scope, run, 'full');
 
   try {
     if (isP2p) {

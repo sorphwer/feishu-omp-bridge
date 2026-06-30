@@ -310,6 +310,35 @@ export function resolveBatchProfile(
   return { profile: LOCKED_PROFILE, principals };
 }
 
+export type InjectionDecision = 'no-run' | 'inject' | 'defer';
+
+/**
+ * Decide what to do with a message that arrives while a run is ALREADY active
+ * for its scope (the mid-run path that bypasses the debounce batch entirely).
+ *
+ * The active run was spawned with one profile's tools. Injecting a message
+ * whose own sender resolves to a DIFFERENT profile would run that sender under
+ * the active profile's permissions — the exact escalation `resolveBatchProfile`
+ * guards against for batches (and even two different profiles in one batch fail
+ * closed). So injection is allowed ONLY when the incoming sender resolves to the
+ * SAME profile name as the active run. Otherwise the message is deferred: it
+ * falls back to the pending queue and runs after the active run ends, under its
+ * own (correctly resolved) profile.
+ *
+ * `activeProfileName` is the profile the active run was started with, or
+ * undefined when no run is active for the scope.
+ */
+export function injectionDecision(
+  cfg: AppConfig,
+  senderId: string | undefined,
+  ctx: { chat?: PolicyScenario; chatId?: string },
+  activeProfileName: string | undefined,
+): InjectionDecision {
+  if (activeProfileName === undefined) return 'no-run';
+  const { profile } = resolveBatchProfile(cfg, [senderId], ctx);
+  return profile.name === activeProfileName ? 'inject' : 'defer';
+}
+
 /** The explicit policy when set, else one synthesized from legacy fields. */
 export function effectivePolicy(cfg: AppConfig): PolicyConfig {
   return cfg.policy ?? synthesizeLegacyPolicy(cfg);

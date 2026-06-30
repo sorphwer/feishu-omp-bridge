@@ -117,7 +117,13 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
   // default in case it does.
   const synthChatId = `doc:${evt.fileToken}`;
   const cwd = workspaces.cwdFor(synthChatId) ?? homedir();
-  const resumeFrom = sessions.resumeFor(synthChatId, cwd);
+  // Cloud docs are a SHARED surface, so resolve the commenter's profile under
+  // the 'group' scenario — the configured sandbox applies here too, closing the
+  // bypass where a non-trusted commenter would otherwise run full tools. Sessions
+  // are keyed by (synthChatId, profile) so a restricted commenter never resumes a
+  // full-tools thread on the same doc.
+  const { profile } = resolveBatchProfile(cfg, [evt.operator.openId], { chat: 'group' });
+  const resumeFrom = sessions.resumeFor(synthChatId, cwd, profile.name);
   log.info('comment', 'session', { synthChatId, resumeFrom: resumeFrom ?? null, cwd });
 
   // Cloud-doc comments have no streaming UI — the user just sees their
@@ -128,12 +134,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
     ? await addCommentReaction(channel, target.fileToken, target.fileType, ctx.targetReplyId)
     : false;
 
-  // Cloud docs are a SHARED surface, so resolve the commenter's profile under
-  // the 'group' scenario — the configured sandbox applies here too, closing the
-  // bypass where a non-trusted commenter would otherwise run full tools. Absent
-  // any sandbox config this stays full-tools (today's behavior). Comments have
-  // no Feishu host integration, so only command tools are exposed.
-  const { profile } = resolveBatchProfile(cfg, [evt.operator.openId], { chat: 'group' });
+  // Comments have no Feishu host integration, so only command tools are exposed.
   const guestArgs = await buildProfileRunArgs(profile);
   const commandTools = buildCommandTools(profile.commandTools, cwd);
   const runPrompt = profile.systemPrompt ? `${profile.systemPrompt}\n\n---\n\n${prompt}` : prompt;
@@ -159,7 +160,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
         case 'system':
           if (e.sessionId) {
             const effectiveCwd = e.cwd ?? cwd;
-            sessions.set(synthChatId, e.sessionId, effectiveCwd);
+            sessions.set(synthChatId, e.sessionId, effectiveCwd, profile.name);
           }
           break;
         case 'error':

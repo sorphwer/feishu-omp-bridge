@@ -20,7 +20,7 @@ describe('ActiveRuns OMP UI routing', () => {
       },
     };
 
-    const handle = activeRuns.register('scope-1', run);
+    const handle = activeRuns.register('scope-1', run, 'full');
     handle.pendingUiRequests.add('ui-1');
     let settled = 0;
     handle.onUiSettled = () => {
@@ -50,10 +50,24 @@ describe('ActiveRuns OMP UI routing', () => {
       },
     };
 
-    activeRuns.register('scope-1', run);
+    activeRuns.register('scope-1', run, 'full');
 
     await expect(activeRuns.submitPrompt('scope-1', 'follow_up', 'next', ['a.png'])).resolves.toBe(true);
     expect(activeRuns.has('scope-1')).toBe(true);
     expect(prompts).toEqual([{ kind: 'follow_up', message: 'next', imagePaths: ['a.png'] }]);
+  });
+
+  it('exposes the active run profile name and clears it on unregister', () => {
+    const activeRuns = new ActiveRuns();
+    const run: AgentRun = {
+      events: emptyEvents(),
+      stop: async () => {},
+      waitForExit: async () => true,
+    };
+    expect(activeRuns.profileName('scope-1')).toBeUndefined();
+    activeRuns.register('scope-1', run, 'kb');
+    expect(activeRuns.profileName('scope-1')).toBe('kb');
+    activeRuns.unregister('scope-1', run);
+    expect(activeRuns.profileName('scope-1')).toBeUndefined();
   });
 });

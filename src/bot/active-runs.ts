@@ -2,6 +2,10 @@ import type { AgentRun, AgentUiResponse } from '../agent/types';
 
 export interface RunHandle {
   run: AgentRun;
+  /** The profile name this run was spawned with. A mid-run message may only be
+   * injected (follow_up/steer) when its own sender resolves to this same
+   * profile — otherwise it would run under permissions it isn't entitled to. */
+  profileName: string;
   interrupted: boolean;
   pendingUiRequests: Set<string>;
   onUiSettled?: () => void;
@@ -10,8 +14,8 @@ export interface RunHandle {
 export class ActiveRuns {
   private readonly handles = new Map<string, RunHandle>();
 
-  register(chatId: string, run: AgentRun): RunHandle {
-    const handle: RunHandle = { run, interrupted: false, pendingUiRequests: new Set() };
+  register(chatId: string, run: AgentRun, profileName: string): RunHandle {
+    const handle: RunHandle = { run, profileName, interrupted: false, pendingUiRequests: new Set() };
     this.handles.set(chatId, handle);
     return handle;
   }
@@ -23,6 +27,11 @@ export class ActiveRuns {
 
   has(chatId: string): boolean {
     return this.handles.has(chatId);
+  }
+
+  /** The profile name of the active run for this scope, or undefined when idle. */
+  profileName(chatId: string): string | undefined {
+    return this.handles.get(chatId)?.profileName;
   }
 
   /**

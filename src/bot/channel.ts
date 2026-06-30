@@ -19,6 +19,7 @@ import {
   markIdleTimeout,
   markInterrupted,
   reduce,
+  type RunBadge,
   type RunState,
 } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
@@ -36,7 +37,7 @@ import {
   isChatAllowed,
   isUserAllowed,
 } from '../config/schema';
-import { resolveBatchProfile } from '../config/policy';
+import { injectionDecision, resolveBatchProfile } from '../config/policy';
 import { resolveAppSecret, resolveRelaySecret } from '../config/secret-resolver';
 import { log, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
@@ -54,7 +55,7 @@ import { configureNetwork, type NetworkOverrides } from './network-config';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, renderQuotedBlock, type QuotedContext } from './quote';
-import { addWorkingReaction, removeReaction } from './reaction';
+import { addReaction, removeReaction, REACTION_DEFERRED } from './reaction';
 import { startRelayServer, type RelayServerHandle } from '../relay/front';
 import { createRelayRouter, type RelayRouter } from '../relay/route';
 import { startRelayWorker } from '../relay/worker';
@@ -600,10 +601,21 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  if (await submitToActiveRun({ channel, activeRuns, media, msg, scope })) {
+  const submitted = await submitToActiveRun({
+    channel,
+    activeRuns,
+    media,
+    msg,
+    scope,
+    chat: chatMode,
+    cfg: controls.cfg,
+  });
+  if (submitted === 'injected') {
     log.info('intake', 'submitted-active-run', { scope });
     return;
   }
+  // 'deferred' (or 'no-run') falls through to the pending queue: the message
+  // re-resolves under its OWN sender's profile after the active run ends.
 
   const size = pending.push(scope, msg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
@@ -615,9 +627,29 @@ async function submitToActiveRun(deps: {
   media: MediaCache;
   msg: NormalizedMessage;
   scope: string;
-}): Promise<boolean> {
-  const { channel, activeRuns, media, msg, scope } = deps;
-  if (!activeRuns.has(scope)) return false;
+  chat: ChatMode;
+  cfg: AppConfig;
+}): Promise<'injected' | 'deferred' | 'no-run'> {
+  const { channel, activeRuns, media, msg, scope, chat, cfg } = deps;
+  const activeProfile = activeRuns.profileName(scope);
+  // Mid-run join gate: a message may only be injected into the active run when
+  // its own sender resolves to the SAME profile that run was spawned with.
+  // Otherwise it would execute under permissions the sender isn't entitled to
+  // (the group escalation: a low-privilege member riding a `full` run). Such a
+  // message is DEFERRED — it returns to the pending queue and runs after the
+  // active run ends, under its own profile.
+  const decision = injectionDecision(cfg, msg.senderId, { chat, chatId: msg.chatId }, activeProfile);
+  if (decision === 'no-run') return 'no-run';
+  if (decision === 'defer') {
+    log.info('intake', 'mid-run-deferred', {
+      scope,
+      sender: msg.senderId.slice(-6),
+      activeProfile,
+    });
+    // Non-spammy ack: signal "received, will answer after the current run".
+    await addReaction(channel, msg.messageId, REACTION_DEFERRED);
+    return 'deferred';
+  }
   const resources = msg.resources.map((resource) => ({ messageId: msg.messageId, resource }));
   const attachments = await media.resolve(msg.chatId, resources);
   const imagePaths = attachments.filter((attachment) => attachment.kind === 'image').map((attachment) => attachment.path);
@@ -629,7 +661,10 @@ async function submitToActiveRun(deps: {
   const prompt = buildPrompt([msg], attachments, quotes);
   const trimmed = msg.content.trimStart();
   const kind = trimmed.startsWith('!') ? 'steer' : 'follow_up';
-  return activeRuns.submitPrompt(scope, kind, prompt, imagePaths);
+  const ok = await activeRuns.submitPrompt(scope, kind, prompt, imagePaths);
+  // A race (run ended between the gate and submit) leaves the message unhandled;
+  // defer it to the pending queue rather than dropping it.
+  return ok ? 'injected' : 'no-run';
 }
 
 interface RunBatchDeps {
@@ -710,26 +745,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
 
   const cwd = workspaces.cwdFor(scope) ?? homedir();
-  const resumeFrom = sessions.resumeFor(scope, cwd);
-  if (resumeFrom) {
-    log.info('session', 'resume', { sessionId: resumeFrom, cwd });
-  } else {
-    const stale = sessions.getRaw(scope);
-    if (stale && stale.cwd !== cwd) {
-      log.info('session', 'stale-cleared', { staleCwd: stale.cwd, newCwd: cwd });
-      sessions.clear(scope);
-    } else {
-      log.info('session', 'fresh', { cwd });
-    }
-  }
-
-  const feishuHost = createFeishuHostIntegration(channel, {
-    scope,
-    chatId,
-    threadId,
-    replyToMessageId: lastMsg.messageId,
-    cwd,
-  });
 
   // Resolve the agent profile for this batch from the unified policy
   // (principals × scenario × first-match rules). The most-restrictive sender
@@ -742,6 +757,24 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     batch.map((m) => m.senderId),
     { chat: mode, chatId },
   );
+
+  // Sessions are keyed by (scope, profile): a run only resumes a thread its OWN
+  // profile created, so a lower-privilege run never inherits a `full` session's
+  // context in a shared chat, and each tier keeps its own conversation thread.
+  const resumeFrom = sessions.resumeFor(scope, cwd, profile.name);
+  if (resumeFrom) {
+    log.info('session', 'resume', { sessionId: resumeFrom, cwd, profile: profile.name });
+  } else {
+    log.info('session', 'fresh', { cwd, profile: profile.name });
+  }
+
+  const feishuHost = createFeishuHostIntegration(channel, {
+    scope,
+    chatId,
+    threadId,
+    replyToMessageId: lastMsg.messageId,
+    cwd,
+  });
 
   // Host-tool surface follows the profile for EVERY profile (not just
   // restricted): Feishu host tools only when `feishuHostTools` is on, plus any
@@ -773,6 +806,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     systemPrompt: Boolean(profile.systemPrompt),
   });
 
+  // Card header badge: advertise the run's tool mode + originator so everyone
+  // in a shared chat can see what permissions the conversation holds (and why a
+  // lower-privilege member's mid-run message gets deferred). Group/topic only —
+  // p2p is single-party. Snapshot now (run-start), never a live cfg lookup.
+  const badge: RunBadge | undefined =
+    mode === 'p2p'
+      ? undefined
+      : { profileName: profile.name, restricted: profile.restricted, owner: firstMsg.senderName };
+  const runInitialState: RunState = badge ? { ...initialState, badge } : initialState;
+
   const spawnHandle = (sessionId: string | undefined): RunHandle =>
     activeRuns.register(
       scope,
@@ -789,6 +832,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         configOverlayPaths: guestArgs?.configOverlayPaths,
         extensionPaths: guestArgs?.extensionPaths,
       }),
+      profile.name,
     );
 
   // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
@@ -857,16 +901,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     let handle = spawnHandle(resumeFrom);
     try {
       const { sessionNotFound } = await processAgentStream(
-        handle, sessions, scope, cwd, idleTimeoutMs, resumeFrom !== undefined, flush, uiHooks,
+        handle, sessions, scope, cwd, profile.name, runInitialState, idleTimeoutMs, resumeFrom !== undefined, flush, uiHooks,
       );
       if (sessionNotFound && resumeFrom) {
         log.warn('session', 'resume-miss-retry', { sessionId: resumeFrom });
-        sessions.clear(scope);
+        sessions.clearProfile(scope, profile.name);
         activeRuns.unregister(scope, handle.run);
         handle = spawnHandle(undefined);
         // Fresh retry: not recoverable, so a (very unlikely) repeat error
         // renders normally and the card always reaches a terminal state.
-        await processAgentStream(handle, sessions, scope, cwd, idleTimeoutMs, false, flush, uiHooks);
+        await processAgentStream(handle, sessions, scope, cwd, profile.name, runInitialState, idleTimeoutMs, false, flush, uiHooks);
       }
     } finally {
       activeRuns.unregister(scope, handle.run);
@@ -879,7 +923,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // remove it in finally. Card mode has a visible "正在思考…" footer the
   // moment the initial card lands, so the extra reaction would be redundant.
   const reactionId =
-    replyMode === 'card' ? undefined : await addWorkingReaction(channel, lastMsg.messageId);
+    replyMode === 'card' ? undefined : await addReaction(channel, lastMsg.messageId);
 
   try {
     if (replyMode === 'card') {
@@ -887,7 +931,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         chatId,
         {
           card: {
-            initial: renderCard(initialState),
+            initial: renderCard(runInitialState),
             producer: async (ctrl) => {
               await driveAgent(async (state) => {
                 await ctrl.update(renderCard(filterForPrefs(state)));
@@ -913,7 +957,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // text mode: drain the agent stream without sending anything during
       // the run, then post the final rendered text once as a plain markdown
       // (msg_type=post) message — no card, no streaming, no typewriter.
-      let finalState: RunState = initialState;
+      let finalState: RunState = runInitialState;
       await driveAgent(async (state) => {
         finalState = state;
       });
@@ -941,6 +985,12 @@ async function processAgentStream(
   sessions: SessionStore,
   scope: string,
   cwd: string,
+  /** Profile name this run was spawned with — the session is stored under
+   * (scope, profile) so a lower-privilege run never resumes a `full` thread. */
+  profileName: string,
+  /** Run-start state (carries the profile/owner badge), used as the seed so the
+   * card header is present from the first frame. */
+  initial: RunState,
   idleTimeoutMs: number | undefined,
   // Only the first, resumed attempt may swallow a "session not found" abort for
   // the caller to retry fresh. A fresh attempt renders the error normally so it
@@ -949,7 +999,7 @@ async function processAgentStream(
   flush: (state: RunState) => Promise<void>,
   hooks?: AgentStreamHooks,
 ): Promise<{ sessionNotFound: boolean }> {
-  let state: RunState = initialState;
+  let state: RunState = initial;
   // Set when omp aborts because the session we asked it to --resume is gone.
   // The caller clears the stored session and retries with a fresh one; we do
   // NOT reduce this into a terminal error so the retry can continue into the
@@ -1016,8 +1066,8 @@ async function processAgentStream(
       if (evt.type === 'system') {
         if (evt.sessionId) {
           const effectiveCwd = evt.cwd ?? cwd;
-          sessions.set(scope, evt.sessionId, effectiveCwd);
-          log.info('session', 'set', { sessionId: evt.sessionId });
+          sessions.set(scope, evt.sessionId, effectiveCwd, profileName);
+          log.info('session', 'set', { sessionId: evt.sessionId, profile: profileName });
         }
         continue;
       }

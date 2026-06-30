@@ -50,13 +50,34 @@ export function renderCard(state: RunState): object {
     elements.push(stopButton());
   }
 
+  const header = badgeHeader(state.badge);
   return {
     schema: '2.0',
     config: {
       streaming_mode: state.terminal === 'running',
       summary: { content: summaryText(state) },
     },
+    ...(header ? { header } : {}),
     body: { elements },
+  };
+}
+
+/**
+ * Card header advertising the run's tool mode + originator. Colour encodes
+ * trust: green = unrestricted `full`, grey = a restricted sandbox, red = the
+ * fail-closed `locked` profile. Absent badge (p2p) → no header.
+ */
+function badgeHeader(badge: RunState['badge']): object | undefined {
+  if (!badge) return undefined;
+  const locked = badge.profileName === 'locked' || badge.profileName.startsWith('locked(');
+  const icon = locked ? '⛔' : badge.restricted ? '🔒' : '🔓';
+  const template = locked ? 'red' : badge.restricted ? 'grey' : 'green';
+  const label = badge.restricted && !locked ? `${badge.profileName}（受限）` : badge.profileName;
+  const title = `${icon} ${label}`;
+  return {
+    template,
+    title: { tag: 'plain_text', content: title },
+    ...(badge.owner ? { subtitle: { tag: 'plain_text', content: `@${badge.owner}` } } : {}),
   };
 }
 

@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { paths } from './paths';
 import {
   effectivePolicy,
+  injectionDecision,
   principalOf,
   relayRunTarget,
   resolveBatchProfile,
@@ -217,5 +218,39 @@ describe('resolveBatchProfile', () => {
   it('treats a missing senderId as guest (fail-closed)', () => {
     const r = resolveBatchProfile(c, [undefined], { chat: 'p2p' });
     expect(r.profile.name).toBe('kb');
+  });
+});
+
+describe('injectionDecision (mid-run join gate)', () => {
+  const c = cfg({
+    policy: {
+      principals: { owner: ['ou_owner'] },
+      profiles: { kb: { tools: ['read'] } },
+      rules: [
+        { when: { principal: 'owner' }, profile: 'full' },
+        { when: { principal: 'guest' }, profile: 'kb' },
+      ],
+    },
+  });
+
+  it('returns no-run when nothing is active for the scope', () => {
+    expect(injectionDecision(c, 'ou_owner', { chat: 'group' }, undefined)).toBe('no-run');
+  });
+
+  it('injects when the sender resolves to the same profile as the active run', () => {
+    expect(injectionDecision(c, 'ou_owner', { chat: 'group' }, 'full')).toBe('inject');
+  });
+
+  it('defers a lower-privilege sender trying to join a full run (no escalation)', () => {
+    // The exact scenario: a guest interjects while the owner's `full` run streams.
+    expect(injectionDecision(c, 'ou_stranger', { chat: 'group' }, 'full')).toBe('defer');
+  });
+
+  it('defers a full sender from joining a restricted run (no identity mixing)', () => {
+    expect(injectionDecision(c, 'ou_owner', { chat: 'group' }, 'kb')).toBe('defer');
+  });
+
+  it('lets a same-tier guest join another guest run', () => {
+    expect(injectionDecision(c, 'ou_stranger', { chat: 'group' }, 'kb')).toBe('inject');
   });
 });

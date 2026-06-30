@@ -24,6 +24,17 @@ export interface UiState {
 export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | 'waiting_input' | null;
 export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_timeout';
 
+/** Run-start identity shown as the card header: which profile (tool mode) the
+ * run executes under and who started it. Captured ONCE at spawn — never a live
+ * config lookup — so a mid-stream /config change can't relabel a run with
+ * permissions it doesn't actually hold. Absent for p2p (single-party) chats. */
+export interface RunBadge {
+  profileName: string;
+  restricted: boolean;
+  /** Display name of the run's originator (the batch's lead sender), if known. */
+  owner?: string;
+}
+
 export interface RunState {
   blocks: Block[];
   reasoning: { content: string; active: boolean };
@@ -31,6 +42,8 @@ export interface RunState {
   terminal: Terminal;
   ui: UiState;
   errorMsg?: string;
+  /** Profile/owner header metadata, seeded at run start (group/topic only). */
+  badge?: RunBadge;
   /** Set when terminal === 'idle_timeout' — how long OMP was idle before
    * the watchdog gave up (so the message can say "N 分钟无响应"). */
   idleTimeoutMinutes?: number;

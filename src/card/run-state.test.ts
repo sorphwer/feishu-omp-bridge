@@ -48,4 +48,10 @@ describe('run-state OMP UI integration', () => {
     expect(updated.blocks[0]).toMatchObject({ kind: 'tool', tool: { output: 'working', status: 'running' } });
     expect(done.blocks[0]).toMatchObject({ kind: 'tool', tool: { output: 'done', status: 'done' } });
   });
+
+  it('preserves the run badge across reduce transitions', () => {
+    const seeded = { ...initialState, badge: { profileName: 'full', restricted: false, owner: '张三' } };
+    const next = reduce(seeded, { type: 'text', delta: 'hi' });
+    expect(next.badge).toEqual({ profileName: 'full', restricted: false, owner: '张三' });
+  });
 });
