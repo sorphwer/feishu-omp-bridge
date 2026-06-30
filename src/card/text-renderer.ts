@@ -14,6 +14,12 @@ import { toolHeaderText } from './tool-render';
 export function renderText(state: RunState): string {
   const parts: string[] = [];
 
+  // Markdown mode has no card header, so surface the profile/owner badge as a
+  // top line — the markdown equivalent of renderCard's coloured header. Seeded
+  // for group/topic runs only (p2p is single-party).
+  const badge = badgeLine(state.badge);
+  if (badge) parts.push(badge);
+
   const ui = renderUiContext(state.ui);
   if (ui) parts.push(ui);
   for (const block of state.blocks) {
@@ -33,6 +39,20 @@ export function renderText(state: RunState): string {
   }
 
   return parts.join('\n\n');
+}
+
+/**
+ * Top profile badge for markdown mode, e.g. `🔒 **guest（受限）** · @张三`.
+ * Colour isn't available in markdown, so trust is carried by the icon:
+ * 🔓 unrestricted `full`, 🔒 a restricted sandbox, ⛔ fail-closed `locked`.
+ */
+function badgeLine(badge: RunState['badge']): string {
+  if (!badge) return '';
+  const locked = badge.profileName === 'locked' || badge.profileName.startsWith('locked(');
+  const icon = locked ? '⛔' : badge.restricted ? '🔒' : '🔓';
+  const label = badge.restricted && !locked ? `${badge.profileName}（受限）` : badge.profileName;
+  const owner = badge.owner ? ` · @${badge.owner}` : '';
+  return `${icon} **${label}**${owner}`;
 }
 
 function renderBlock(block: Block): string {
