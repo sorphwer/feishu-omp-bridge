@@ -3,6 +3,7 @@ import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
 import type { PendingQueue } from '../bot/pending-queue';
+import { scopeFor } from '../bot/scope';
 import { runCommandHandler, type CommandContext, type Controls } from '../commands';
 import { isChatAllowed, isUserAllowed } from '../config/schema';
 import { log } from '../core/logger';
@@ -128,18 +129,18 @@ async function resolveScope(
 ): Promise<{ scope: string; threadId: string | undefined; mode: 'p2p' | 'group' | 'topic' }> {
   const chatId = deps.evt.chatId;
   const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
-  if (mode !== 'topic') {
+  if (mode === 'p2p') {
     return { scope: chatId, threadId: undefined, mode };
   }
-  // Topic group — need the carrier message's thread_id to compose scope.
-  // One API call per click; could cache by messageId if it ever becomes hot.
+  // Any group message may be threaded (topic group OR a thread-enabled normal
+  // group), so look up the carrier message's thread_id to compose the scope.
+  // One API call per group click; could cache by messageId if it ever gets hot.
   const threadId = await lookupMessageThreadId(deps.channel, deps.evt.messageId);
   if (!threadId) {
-    // Fall back to plain chatId. Better to land in the chat's "default"
-    // scope than fail the click silently.
+    // Non-threaded group message: fall back to the chat's default scope.
     return { scope: chatId, threadId: undefined, mode };
   }
-  return { scope: `${chatId}:${threadId}`, threadId, mode };
+  return { scope: scopeFor(chatId, threadId), threadId, mode };
 }
 
 async function lookupMessageThreadId(

@@ -66,9 +66,9 @@ export interface StatusInfo {
   sessionId?: string;
   sessionStale: boolean;
   agentName: string;
-  /** Session scope (= chatId or chatId:threadId in topic groups). */
+  /** Session scope (= chatId, or chatId:threadId for threaded messages). */
   scope: string;
-  /** Chat mode — used to label scope. */
+  /** Chat mode (informational; scope carries the thread split). */
   chatMode: 'p2p' | 'group' | 'topic';
 }
 
@@ -76,12 +76,11 @@ export function statusCard(info: StatusInfo): object {
   const sessionLine = info.sessionId
     ? `\`${info.sessionId.slice(0, 8)}…\`${info.sessionStale ? ' ⚠️ 旧 cwd，下一条会新建' : ''}`
     : '(无)';
-  // For topic groups, surface that the scope is per-topic so the user
-  // knows /cd / /new only affect this topic.
-  const scopeLine =
-    info.chatMode === 'topic'
-      ? `\`${escapeCode(info.scope)}\` _（话题独立 session）_`
-      : `\`${escapeCode(info.scope)}\``;
+  // When the scope is thread-isolated (topic group or a thread-enabled normal
+  // group), surface that so the user knows /cd / /new only affect this thread.
+  const scopeLine = info.scope.includes(':')
+    ? `\`${escapeCode(info.scope)}\` _（话题独立 session）_`
+    : `\`${escapeCode(info.scope)}\``;
   const lines = [
     `🧭 **scope**: ${scopeLine}`,
     `📁 **cwd**: \`${escapeCode(info.cwd)}\``,

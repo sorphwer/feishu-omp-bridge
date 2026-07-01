@@ -54,6 +54,7 @@ import { startKeepalive } from './keepalive';
 import { configureNetwork, type NetworkOverrides } from './network-config';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
+import { scopeForMessage } from './scope';
 import { fetchQuotedContext, renderQuotedBlock, type QuotedContext } from './quote';
 import { addReaction, removeReaction, REACTION_DEFERRED } from './reaction';
 import { startRelayServer, type RelayServerHandle } from '../relay/front';
@@ -531,12 +532,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     chatModeCache,
   } = deps;
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
-  // Resolve scope (and underlying chat mode) once at intake — every
-  // downstream consumer keys off these.
+  // Resolve the session scope (thread-aware) and the chat mode once at intake —
+  // every downstream consumer keys off these. Scope isolates by thread_id
+  // whenever present (topic groups AND thread-enabled normal groups); chatMode
+  // stays Feishu's chat_mode for policy scenario matching + logging.
   const chatMode = await chatModeCache.resolve(channel, msg.chatId);
-  const scope = chatMode === 'topic' && msg.threadId
-    ? `${msg.chatId}:${msg.threadId}`
-    : msg.chatId;
+  const scope = scopeForMessage(msg);
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
@@ -858,12 +859,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
   };
 
-  // For topic groups: thread the reply so it lands in the same topic as the
-  // user's message. Otherwise the SDK posts at top level and the user's
-  // topic discussion breaks visually.
+  // Thread the reply so it lands in the same thread as the user's message —
+  // whenever the message carries a thread_id (topic groups AND thread-enabled
+  // normal groups). Otherwise the SDK posts at top level and the user's thread
+  // discussion breaks visually.
   const sendOpts = {
     replyTo: lastMsg.messageId,
-    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+    ...(threadId ? { replyInThread: true } : {}),
   };
 
   const uiCards = new Map<string, { messageId: string; title: string }>();
