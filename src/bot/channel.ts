@@ -837,15 +837,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       profile.name,
     );
 
-  // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
-  // over global default (preferences). 0 / undefined = no watchdog.
-  const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
-  const idleTimeoutMs =
-    scopeOverride !== undefined
-      ? scopeOverride > 0
-        ? scopeOverride * 60_000
-        : undefined
-      : getRunIdleTimeoutMs(controls.cfg);
+  // Resolve idle-timeout for this run from the global default (preferences).
+  // undefined = no watchdog.
+  const idleTimeoutMs = getRunIdleTimeoutMs(controls.cfg);
   if (idleTimeoutMs) {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }

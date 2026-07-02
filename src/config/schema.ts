@@ -146,7 +146,7 @@ export interface AppPreferences {
    * Global default idle-timeout for OMP runs, in minutes. When set,
    * if OMP emits no stream event for this long the bridge kills the
    * run as presumed-hung. Undefined / 0 = no timeout (the default — runs
-   * can hang indefinitely). Per-scope `/timeout` overrides this.
+   * can hang indefinitely).
    */
   runIdleTimeoutMinutes?: number;
   /**
