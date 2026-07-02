@@ -2,7 +2,7 @@ import type { Block, RunState, ToolEntry, UiState } from './run-state';
 import { toolHeaderText } from './tool-render';
 
 /**
- * Render `RunState` as plain markdown text — used in `messageReply: 'text'`
+ * Render `RunState` as plain markdown text — used in `messageReply: 'markdown'`
  * mode where we stream a markdown message instead of a card.
  *
  * Differences vs `renderCard`:

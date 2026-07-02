@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertNoLegacyPolicyFields,
+  getMessageReplyMode,
   getOmpBinary,
   getOmpModel,
   getOmpSessionDir,
@@ -42,6 +43,17 @@ describe('OMP preferences', () => {
     expect(getOmpThinking(cfg({ ompThinking: ' xhigh ' }))).toBe('xhigh');
     expect(getOmpTools(cfg({ ompTools: ' read,bash ' }))).toBe('read,bash');
     expect(getOmpSessionDir(cfg({ ompSessionDir: ' /tmp/sessions ' }))).toBe('/tmp/sessions');
+  });
+});
+
+describe('getMessageReplyMode', () => {
+  it('coerces removed text mode to markdown', () => {
+    const cfg = { preferences: { messageReply: 'text' } } as never;
+    expect(getMessageReplyMode(cfg)).toBe('markdown');
+  });
+
+  it('defaults to markdown', () => {
+    expect(getMessageReplyMode({} as never)).toBe('markdown');
   });
 });
 

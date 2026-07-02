@@ -894,9 +894,7 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
   const fv = ctx.formValue ?? {};
   const rawReply = String(fv.message_reply ?? '').trim();
   const messageReply: MessageReplyMode =
-    rawReply === 'markdown' || rawReply === 'text' || rawReply === 'card'
-      ? (rawReply as MessageReplyMode)
-      : 'card';
+    rawReply === 'markdown' || rawReply === 'card' ? (rawReply as MessageReplyMode) : 'card';
   const rawTools = String(fv.show_tool_calls ?? '').trim();
   const showToolCalls = rawTools !== 'hide';
   // Parse max_concurrent_runs; invalid input falls back to current value.
@@ -1008,11 +1006,6 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
     ctx.controls.cfg.preferences = {
       ...(ctx.controls.cfg.preferences ?? {}),
       messageReply,
-      // Mark the messageReply value as living in the new (post-0.1.27)
-      // semantic — `text` now means real plain text, not the lightweight
-      // markdown card. Set unconditionally on every submit so a user who
-      // explicitly picks any option gets out of the legacy-coerce path.
-      messageReplyMigrated: true,
       showToolCalls,
       maxConcurrentRuns,
       runIdleTimeoutMinutes,

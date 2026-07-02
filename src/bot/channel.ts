@@ -920,11 +920,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   };
 
-  // For non-card modes OMP's output doesn't surface visually until either
-  // a first streamed token (markdown mode) or the whole run ends (text mode).
-  // Add a "Typing" reaction to the triggering message as an instant ack;
-  // remove it in finally. Card mode has a visible "正在思考…" footer the
-  // moment the initial card lands, so the extra reaction would be redundant.
+  // In markdown mode OMP's output doesn't surface visually until the first
+  // streamed token. Add a "Typing" reaction to the triggering message as an
+  // instant ack; remove it in finally. Card mode has a visible "正在思考…"
+  // footer the moment the initial card lands, so the extra reaction would be
+  // redundant.
   const reactionId =
     replyMode === 'card' ? undefined : await addReaction(channel, lastMsg.messageId);
 
@@ -944,7 +944,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         sendOpts,
       );
-    } else if (replyMode === 'markdown') {
+    } else {
       await channel.stream(
         chatId,
         {
@@ -956,18 +956,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         sendOpts,
       );
-    } else {
-      // text mode: drain the agent stream without sending anything during
-      // the run, then post the final rendered text once as a plain markdown
-      // (msg_type=post) message — no card, no streaming, no typewriter.
-      let finalState: RunState = runInitialState;
-      await driveAgent(async (state) => {
-        finalState = state;
-      });
-      const body = renderText(filterForPrefs(finalState));
-      if (body.trim()) {
-        await channel.send(chatId, { markdown: body }, sendOpts);
-      }
     }
   } catch (err) {
     log.fail('stream', err);

@@ -37,7 +37,6 @@ export function configFormCard(opts: ConfigFormOpts): object {
               tag: 'markdown',
               content:
                 '**消息回复方式**\n' +
-                '_纯文本:agent 跑完一次性发出,不流式,体感最轻_\n' +
                 '_消息卡片:轻量流式 markdown 卡片,飞书原生打字机动画_',
             },
             {
@@ -49,7 +48,6 @@ export function configFormCard(opts: ConfigFormOpts): object {
               // overwrites if the user actually picks something.
               initial_option: opts.messageReply === 'card' ? 'markdown' : opts.messageReply,
               options: [
-                { text: { tag: 'plain_text', content: '纯文本' }, value: 'text' },
                 { text: { tag: 'plain_text', content: '消息卡片(默认)' }, value: 'markdown' },
               ],
             },
@@ -204,12 +202,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
 }
 
 export function configSavedCard(opts: ConfigFormOpts): object {
-  const replyLabel =
-    opts.messageReply === 'card'
-      ? '交互卡片'
-      : opts.messageReply === 'markdown'
-        ? '消息卡片'
-        : '纯文本';
+  const replyLabel = opts.messageReply === 'card' ? '交互卡片' : '消息卡片';
   const summarizeList = (raw: string): string => {
     const items = raw.split(',').map((s) => s.trim()).filter(Boolean);
     return items.length === 0 ? '_(不限制)_' : `${items.length} 项`;
