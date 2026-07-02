@@ -1,3 +1,4 @@
+import { log } from '../core/logger';
 import { paths } from './paths';
 
 export type TenantBrand = 'feishu' | 'lark';
@@ -156,7 +157,6 @@ export interface AppPreferences {
    * message reach OMP (the 0.1.21-and-earlier behavior).
    *
    * @全员 is never responded to regardless (SDK `respondToMentionAll: false`).
-   * Cloud-doc comments still require @-mention unconditionally.
    */
   requireMentionInGroup?: boolean;
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
@@ -221,8 +221,6 @@ export interface RelayConfig {
  *
  * Absent `policy` = built-in open defaults: everyone gets `full` profile, no
  * relay. Explicit `policy` is authoritative and fail-closed: a sender that
- * matches no rule, or a rule naming an unknown profile, runs LOCKED (zero tools).
- * When `policy` IS present it is authoritative and fail-closed: a sender that
  * matches no rule, or a rule naming an unknown profile, runs LOCKED (zero
  * tools) rather than falling open to the full tool set.
  */
@@ -251,8 +249,8 @@ export interface PrincipalConfig {
    * When `run === 'worker'`, restrict WHICH chat scenarios relay to the worker
    * (default: all). e.g. `['p2p']` sends only this principal's private chats to
    * the worker (a personal laptop) while their group/topic activity stays on the
-   * always-on front. A `'group'` entry also matches `'topic'`. Card actions and
-   * comments resolve through the same gate, so callbacks stay on the side that
+   * always-on front. A `'group'` entry also matches `'topic'`. Card actions
+   * resolve through the same gate, so callbacks stay on the side that
    * rendered the card. Ignored when `run` is `front`.
    */
   relayScenarios?: PolicyScenario[];
@@ -561,5 +559,10 @@ export function assertNoLegacyPolicyFields(cfg: Partial<AppConfig>): void {
         `请迁移到统一 policy（见 CONFIGURATION.zh.md §13）：` +
         `guestPolicy → profiles + rules；relay.route.users → principals.<组>.run: "worker"。`,
     );
+  }
+  // Non-fatal: fields removed in later cleanups that carried no access-control
+  // semantics — just note they're ignored rather than silently vanishing.
+  for (const key of ['codexBinary', 'codexModel', 'messageReplyMigrated']) {
+    if (prefs && key in prefs) log.info('config', 'ignoring-removed-field', { field: `preferences.${key}` });
   }
 }

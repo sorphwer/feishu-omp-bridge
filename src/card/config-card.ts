@@ -33,28 +33,16 @@ export function configFormCard(opts: ConfigFormOpts): object {
           tag: 'form',
           name: 'config_form',
           elements: [
+            // `message_reply` picker removed: 'markdown' is the only reachable
+            // option now ('card' lives on only for configs that hand-wrote
+            // `messageReply: 'card'` in config.json — see getMessageReplyMode),
+            // so a select with a single choice was dead UI. submitConfig falls
+            // back to the CURRENT config value (not a hardcoded default) when
+            // this field is absent from form_value.
             {
               tag: 'markdown',
               content:
-                '**消息回复方式**\n' +
-                '_消息卡片:轻量流式 markdown 卡片,飞书原生打字机动画_',
-            },
-            {
-              tag: 'select_static',
-              name: 'message_reply',
-              // 'card' (交互卡片) is hidden from the picker for now; existing
-              // configs with `messageReply: 'card'` still work — showConfigForm
-              // displays them as 'markdown' in the form, but submitting only
-              // overwrites if the user actually picks something.
-              initial_option: opts.messageReply === 'card' ? 'markdown' : opts.messageReply,
-              options: [
-                { text: { tag: 'plain_text', content: '消息卡片(默认)' }, value: 'markdown' },
-              ],
-            },
-            {
-              tag: 'markdown',
-              content:
-                '\n**工具调用显示**\n' +
+                '**工具调用显示**\n' +
                 '_显示:可以看到 bot 跑了什么命令、读了哪些文件等过程_\n' +
                 '_隐藏:只看 agent 最终的文字答复,跳过所有工具块_',
             },

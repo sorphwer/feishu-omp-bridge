@@ -258,10 +258,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const { cfg, agent, sessions, workspaces, controls } = deps;
 
   // Apply network-layer overrides (HTTP timeout + proxy from env). Idempotent;
-  // safe to call on every startChannel (used by /account change hot-reload too).
+  // safe to call on every startChannel (used by controls.restart() hot-reload too).
   const netOverrides = configureNetwork();
   // Resolve the App Secret to plaintext. Re-resolved on every startChannel so
-  // /account change picks up new secrets. Also the relay HMAC key seed.
+  // a config-driven restart picks up new secrets. Also the relay HMAC key seed.
   const appSecret = await resolveAppSecret(cfg);
 
   const channel = createLarkChannel(buildChannelOptions(cfg, appSecret, netOverrides));
@@ -474,7 +474,7 @@ export async function startWorker(deps: StartChannelDeps): Promise<BridgeChannel
 
 /** Start the bridge in the role configured by `relay.role` (worker vs the
  * default front/standalone WS bridge). Single entry point for runStart and
- * the /account hot-restart. */
+ * `controls.restart()`. */
 export async function startBridge(deps: StartChannelDeps): Promise<BridgeChannel> {
   return getRelayConfig(deps.cfg)?.role === 'worker' ? startWorker(deps) : startChannel(deps);
 }

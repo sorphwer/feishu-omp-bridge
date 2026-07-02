@@ -57,7 +57,7 @@ export interface ResolvedProfile {
 
 export interface PolicyContext {
   senderId?: string;
-  /** Scenario; undefined when unknown (e.g. card/comment routing). */
+  /** Scenario; undefined when unknown (e.g. an event with no chat scenario). */
   chat?: PolicyScenario;
   chatId?: string;
 }
@@ -125,8 +125,8 @@ function normalizeScenarios(v: unknown): PolicyScenario[] | undefined {
 }
 
 /** True when `scenario` is covered by an `allowed` relay-scenario list. A
- * `group` allowance also covers `topic`. An unknown scenario (e.g. a doc
- * comment) never satisfies an explicit restriction. */
+ * `group` allowance also covers `topic`. An unknown scenario (e.g. an event
+ * with no chat scenario) never satisfies an explicit restriction. */
 function scenarioMatches(allowed: PolicyScenario[], scenario: PolicyScenario | undefined): boolean {
   if (!scenario) return false;
   if (allowed.includes(scenario)) return true;
@@ -253,8 +253,8 @@ export function resolvePolicy(cfg: AppConfig, ctx: PolicyContext): ResolvedPolic
  * Where a sender's runs execute (front/worker). Consulted by the relay router.
  * `scenario` (the chat type of the triggering event) gates per-principal
  * `relayScenarios`: a worker-bound principal only relays the scenarios it lists
- * (default: all). An unknown scenario (e.g. a doc comment) never satisfies an
- * explicit restriction, so it stays on the front.
+ * (default: all). An unknown scenario (e.g. an event with no chat scenario)
+ * never satisfies an explicit restriction, so it stays on the front.
  */
 export function relayRunTarget(
   cfg: AppConfig,

@@ -761,7 +761,7 @@ CommandToolConfig:
 - **配置里仍出现 `preferences.guestPolicy` 或 `relay.route`** → 启动（`bridge run` / `bridge start`）和运行中的 `controls.restart()`（`/reconnect`、keepalive 强制重连都会走它）都会先跑 `assertNoLegacyPolicyFields(cfg)`：命中即**直接抛错拒绝启动/重连**，不会静默忽略、也不会回退合成——因为静默放行一个曾经承载访问控制语义的字段等于**悄悄放开权限**（fail OPEN），这在安全相关配置上是不可接受的。
 - **`preferences.access`（`allowedUsers`/`allowedChats`/`admins`）不受影响**：它不是被合成的对象，是独立于 `policy` 之外、始终生效的粗门控（先决定「能不能进来」，再由 `policy` 决定「能用什么工具」），继续按原样使用。
 
-报错文案示例（`assertNoLegacyPolicyFields`，`src/config/policy.ts`）：
+报错文案示例（`assertNoLegacyPolicyFields`，`src/config/schema.ts`）：
 
 ```
 配置包含已移除的 legacy 字段：preferences.guestPolicy。请迁移到统一 policy（见 CONFIGURATION.zh.md §13）：

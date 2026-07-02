@@ -33,7 +33,7 @@
 
 **Files:** 无代码改动。
 
-- [ ] **Step 1:** `git checkout -b chore/remove-legacy-surface`（当前在 main @ 5d764ba，工作树须干净）。
+- [x] **Step 1:** `git checkout -b chore/remove-legacy-surface`（当前在 main @ 5d764ba，工作树须干净）。
 
 ---
 
@@ -47,7 +47,7 @@
 - Produces: `effectivePolicy(cfg): PolicyConfig`——签名不变；无 `cfg.policy` 时返回内置 `DEFAULT_OPEN_POLICY`（人人 `full`、无 relay principal）。Task 2 依赖此行为。
 - `synthesizeLegacyPolicy` 从 export 中消失；`grep -rn synthesizeLegacyPolicy src` 结果须为空。
 
-- [ ] **Step 1: 写失败测试**（`src/config/policy.test.ts`，替换原 synthesize 相关 describe）：
+- [x] **Step 1: 写失败测试**（`src/config/policy.test.ts`，替换原 synthesize 相关 describe）：
 
 ```ts
 describe('effectivePolicy without explicit policy', () => {
@@ -63,8 +63,8 @@ describe('effectivePolicy without explicit policy', () => {
 });
 ```
 
-- [ ] **Step 2:** `pnpm test -- policy` → 新 describe FAIL（旧合成器仍会因 relay/guestPolicy 缺省而恰好通过部分断言，但删除旧 synthesize 测试后 import 报错先出现——正常，继续）。
-- [ ] **Step 3: 实现**——`policy.ts` 删除三个 legacy 函数与 `GuestToolPolicy`/`getGuestPolicy`/`relayTrustedUsers` 相关 import，`effectivePolicy` 改为：
+- [x] **Step 2:** `pnpm test -- policy` → 新 describe FAIL（旧合成器仍会因 relay/guestPolicy 缺省而恰好通过部分断言，但删除旧 synthesize 测试后 import 报错先出现——正常，继续）。
+- [x] **Step 3: 实现**——`policy.ts` 删除三个 legacy 函数与 `GuestToolPolicy`/`getGuestPolicy`/`relayTrustedUsers` 相关 import，`effectivePolicy` 改为：
 
 ```ts
 /** Policy when none is configured: everyone runs `full`, nothing relays. */
@@ -80,8 +80,8 @@ export function effectivePolicy(cfg: AppConfig): PolicyConfig {
 }
 ```
 
-- [ ] **Step 4:** 删 `policy.test.ts` 中所有针对 `synthesizeLegacyPolicy` / legacy 合成矩阵的测试块；`pnpm typecheck && pnpm test` 全绿。
-- [ ] **Step 5:** `git commit -m "refactor(policy): drop legacy access/guestPolicy/relay.route synthesis"`
+- [x] **Step 4:** 删 `policy.test.ts` 中所有针对 `synthesizeLegacyPolicy` / legacy 合成矩阵的测试块；`pnpm typecheck && pnpm test` 全绿。
+- [x] **Step 5:** `git commit -m "refactor(policy): drop legacy access/guestPolicy/relay.route synthesis"`
 
 ---
 
@@ -95,7 +95,7 @@ export function effectivePolicy(cfg: AppConfig): PolicyConfig {
 **Interfaces:**
 - Produces: `assertNoLegacyPolicyFields(cfg: Partial<AppConfig>): void`——检出 `preferences.guestPolicy` / `relay.route` 即 throw。
 
-- [ ] **Step 1: 写失败测试**（`schema.test.ts`）：
+- [x] **Step 1: 写失败测试**（`schema.test.ts`）：
 
 ```ts
 describe('assertNoLegacyPolicyFields', () => {
@@ -115,8 +115,8 @@ describe('assertNoLegacyPolicyFields', () => {
 });
 ```
 
-- [ ] **Step 2:** `pnpm test -- schema` → FAIL（函数不存在）。
-- [ ] **Step 3: 实现**（`schema.ts`）：
+- [x] **Step 2:** `pnpm test -- schema` → FAIL（函数不存在）。
+- [x] **Step 3: 实现**（`schema.ts`）：
 
 ```ts
 /**
@@ -141,8 +141,8 @@ export function assertNoLegacyPolicyFields(cfg: Partial<AppConfig>): void {
 
 在 `src/cli/commands/start.ts` 的 `runStart` 中，`loadConfig` 返回后立即 `assertNoLegacyPolicyFields(cfg)`（找到现有 `const cfg = await loadConfig(...)` 或等价装配点，紧随其后插入）。
 
-- [ ] **Step 4:** 删 `GuestToolPolicy` 及上述 schema 死代码；跑 `grep -rn "guestPolicy\|GuestToolPolicy\|getGuestPolicy" src scripts`，清掉所有余留（`scripts/test-guest.ts` 若用 legacy 构造则改为 policy/profiles 构造）。`pnpm typecheck && pnpm test` 全绿。
-- [ ] **Step 5:** `git commit -m "refactor(config): remove guestPolicy/relay.route fields, fail fast on legacy config"`
+- [x] **Step 4:** 删 `GuestToolPolicy` 及上述 schema 死代码；跑 `grep -rn "guestPolicy\|GuestToolPolicy\|getGuestPolicy" src scripts`，清掉所有余留（`scripts/test-guest.ts` 若用 legacy 构造则改为 policy/profiles 构造）。`pnpm typecheck && pnpm test` 全绿。
+- [x] **Step 5:** `git commit -m "refactor(config): remove guestPolicy/relay.route fields, fail fast on legacy config"`
 
 ---
 
@@ -158,7 +158,7 @@ export function assertNoLegacyPolicyFields(cfg: Partial<AppConfig>): void {
 **Interfaces:**
 - Produces: `getMessageReplyMode(cfg): 'card' | 'markdown'`。旧配置里的 `messageReply: 'text'`（类型外值）静默回落 `'markdown'`，**不报错**。
 
-- [ ] **Step 1: 写失败测试**：
+- [x] **Step 1: 写失败测试**：
 
 ```ts
 it('coerces removed text mode to markdown', () => {
@@ -170,8 +170,8 @@ it('defaults to markdown', () => {
 });
 ```
 
-- [ ] **Step 2:** `pnpm test -- schema` → 第一条 FAIL（当前 `messageReplyMigrated !== true` 时已回落 markdown，但删除字段后逻辑变化；以最终实现为准）。
-- [ ] **Step 3: 实现**：
+- [x] **Step 2:** `pnpm test -- schema` → 第一条 FAIL（当前 `messageReplyMigrated !== true` 时已回落 markdown，但删除字段后逻辑变化；以最终实现为准）。
+- [x] **Step 3: 实现**：
 
 ```ts
 export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
@@ -183,8 +183,8 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
 
 `channel.ts`：`replyMode` 只剩 card/markdown 两分支，else 即 markdown 路径；删除 text 段与其注释。`renderText` 本体**保留**。
 
-- [ ] **Step 4:** `grep -rn "messageReplyMigrated\|'text'" src --include="*.ts" | grep -v input_type | grep -v test` 清余留；`pnpm typecheck && pnpm test`。
-- [ ] **Step 5:** `git commit -m "refactor(reply): drop text reply mode and messageReplyMigrated shim"`
+- [x] **Step 4:** `grep -rn "messageReplyMigrated\|'text'" src --include="*.ts" | grep -v input_type | grep -v test` 清余留；`pnpm typecheck && pnpm test`。
+- [x] **Step 5:** `git commit -m "refactor(reply): drop text reply mode and messageReplyMigrated shim"`
 
 ---
 
@@ -200,7 +200,7 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
 **Interfaces:**
 - Produces: `getOmpBinary(cfg)` 只读 `preferences.ompBinary`；`getOmpModel(cfg)` 只读 `preferences.ompModel`。CLI 不再有 `migrate` 子命令。
 
-- [ ] **Step 1: 写失败测试**（`schema.test.ts`）：
+- [x] **Step 1: 写失败测试**（`schema.test.ts`）：
 
 ```ts
 it('ignores legacy codexBinary alias', () => {
@@ -209,10 +209,10 @@ it('ignores legacy codexBinary alias', () => {
 });
 ```
 
-- [ ] **Step 2:** `pnpm test -- schema` → FAIL（当前会回落 codexBinary）。
-- [ ] **Step 3: 实现**：删别名回落与字段；删 migrate.ts 与注册；删 `legacyPaths`（`grep -rn legacyPaths src` 确认仅 migrate 在用）。
-- [ ] **Step 4:** `pnpm typecheck && pnpm test`；`node dist` 不需验证（build 在 Task 10）。
-- [ ] **Step 5:** `git commit -m "chore(cli): remove pre-0.1.11 migrate command, legacy paths and codex* aliases"`
+- [x] **Step 2:** `pnpm test -- schema` → FAIL（当前会回落 codexBinary）。
+- [x] **Step 3: 实现**：删别名回落与字段；删 migrate.ts 与注册；删 `legacyPaths`（`grep -rn legacyPaths src` 确认仅 migrate 在用）。
+- [x] **Step 4:** `pnpm typecheck && pnpm test`；`node dist` 不需验证（build 在 Task 10）。
+- [x] **Step 5:** `git commit -m "chore(cli): remove pre-0.1.11 migrate command, legacy paths and codex* aliases"`
 
 ---
 
@@ -227,7 +227,7 @@ it('ignores legacy codexBinary alias', () => {
 **Interfaces:**
 - Produces: `ScopeEntry = { sessions: Record<string, ProfileSession>; updatedAt: number }`。全局 `runIdleTimeoutMinutes`（preferences）与看门狗、`RunState.idleTimeoutMinutes` 展示字段**不动**。
 
-- [ ] **Step 1: 写失败测试**（`store.test.ts`，替换 idle-override 相关用例）：
+- [x] **Step 1: 写失败测试**（`store.test.ts`，替换 idle-override 相关用例）：
 
 ```ts
 it('drops legacy entries that only carried an idle override', async () => {
@@ -241,15 +241,15 @@ it('drops legacy entries that only carried an idle override', async () => {
 
 （`writeFixture` 按现有测试文件的既有写盘辅助改写——store.test.ts 里已有同类 helper，沿用其模式。）
 
-- [ ] **Step 2:** `pnpm test -- session` → FAIL。
-- [ ] **Step 3: 实现**：按 Files 清单删除；channel.ts 该段变为：
+- [x] **Step 2:** `pnpm test -- session` → FAIL。
+- [x] **Step 3: 实现**：按 Files 清单删除；channel.ts 该段变为：
 
 ```ts
 const idleTimeoutMs = getRunIdleTimeoutMs(controls.cfg);
 ```
 
-- [ ] **Step 4:** `grep -rn "idleTimeoutMinutes" src --include="*.ts" | grep -v run-state | grep -v run-renderer | grep -v text-renderer | grep -v "runIdleTimeoutMinutes"` 应为空；`pnpm typecheck && pnpm test`。
-- [ ] **Step 5:** `git commit -m "refactor(session): drop per-scope /timeout override, global idle timeout only"`
+- [x] **Step 4:** `grep -rn "idleTimeoutMinutes" src --include="*.ts" | grep -v run-state | grep -v run-renderer | grep -v text-renderer | grep -v "runIdleTimeoutMinutes"` 应为空；`pnpm typecheck && pnpm test`。
+- [x] **Step 5:** `git commit -m "refactor(session): drop per-scope /timeout override, global idle timeout only"`
 
 ---
 
@@ -265,10 +265,10 @@ const idleTimeoutMs = getRunIdleTimeoutMs(controls.cfg);
 - Consumes: `buildEncryptedAccountConfig`（`src/config/store.ts:69`）**保留**——setup 向导仍用。
 - Produces: 无 `/account` 命令；换凭据的唯一路径 = CLI（向导 / `secrets set` + `service restart`）。
 
-- [ ] **Step 1:** `grep -rn "account" src/commands/index.ts src/card/ --include="*.ts" | grep -v Account 之外的误报`，圈定精确删除范围（注意 `accounts.app` 是活跃配置结构，别碰）。
-- [ ] **Step 2:** 删除上述范围；`validateAppCredentials` 若 setup 向导（start.ts）也在用则保留原位。
-- [ ] **Step 3:** `pnpm typecheck && pnpm test` 全绿；手动 `grep -rn "account-cards\|accountFormCard\|handleAccount" src` 为空。
-- [ ] **Step 4:** `git commit -m "refactor(commands): remove /account in-chat credential flow (CLI covers it)"`
+- [x] **Step 1:** `grep -rn "account" src/commands/index.ts src/card/ --include="*.ts" | grep -v Account 之外的误报`，圈定精确删除范围（注意 `accounts.app` 是活跃配置结构，别碰）。
+- [x] **Step 2:** 删除上述范围；`validateAppCredentials` 若 setup 向导（start.ts）也在用则保留原位。
+- [x] **Step 3:** `pnpm typecheck && pnpm test` 全绿；手动 `grep -rn "account-cards\|accountFormCard\|handleAccount" src` 为空。
+- [x] **Step 4:** `git commit -m "refactor(commands): remove /account in-chat credential flow (CLI covers it)"`
 
 ---
 
@@ -286,10 +286,10 @@ const idleTimeoutMs = getRunIdleTimeoutMs(controls.cfg);
 **Interfaces:**
 - Produces: `RelayRouter = { routeMessage; routeCardAction }`；`BridgeRuntime` 无 `dispatchComment`。@bot 的文档评论从此**无响应**（SDK 事件不再注册）。
 
-- [ ] **Step 1:** 确认 SDK 侧注册点：`grep -n "comment" src/bot/channel.ts`——事件 handler 对象里的 `comment:` 键即注册处，删除后 SDK 不订阅该事件。
-- [ ] **Step 2:** 按 Files 清单删除；`grep -rn "CommentEvent\|handleCommentMention\|routeComment\|addCommentReaction" src` 为空。
-- [ ] **Step 3:** `pnpm typecheck && pnpm test` 全绿（`relay` 相关测试若枚举三种 kind 需同步收窄为两种）。
-- [ ] **Step 4:** `git commit -m "refactor(bot): remove cloud-doc comment pipeline"`
+- [x] **Step 1:** 确认 SDK 侧注册点：`grep -n "comment" src/bot/channel.ts`——事件 handler 对象里的 `comment:` 键即注册处，删除后 SDK 不订阅该事件。
+- [x] **Step 2:** 按 Files 清单删除；`grep -rn "CommentEvent\|handleCommentMention\|routeComment\|addCommentReaction" src` 为空。
+- [x] **Step 3:** `pnpm typecheck && pnpm test` 全绿（`relay` 相关测试若枚举三种 kind 需同步收窄为两种）。
+- [x] **Step 4:** `git commit -m "refactor(bot): remove cloud-doc comment pipeline"`
 
 ---
 
@@ -309,9 +309,9 @@ const idleTimeoutMs = getRunIdleTimeoutMs(controls.cfg);
 throw new Error('Windows 守护进程支持已移除；请前台运行 `feishu-omp-bridge run`，或用 WSL + systemd。');
 ```
 
-- [ ] **Step 1:** `grep -rn "schtasks\|win32" src/daemon src/cli --include="*.ts"` 圈定范围。
-- [ ] **Step 2:** 删除 + 替换 win32 分支为上述报错；`pnpm typecheck && pnpm test`。
-- [ ] **Step 3:** `git commit -m "chore(daemon): drop Windows schtasks support"`
+- [x] **Step 1:** `grep -rn "schtasks\|win32" src/daemon src/cli --include="*.ts"` 圈定范围。
+- [x] **Step 2:** 删除 + 替换 win32 分支为上述报错；`pnpm typecheck && pnpm test`。
+- [x] **Step 3:** `git commit -m "chore(daemon): drop Windows schtasks support"`
 
 ---
 
@@ -333,16 +333,16 @@ throw new Error('Windows 守护进程支持已移除；请前台运行 `feishu-o
 
 ### Task 10: 终验
 
-- [ ] **Step 1:** `pnpm typecheck && pnpm test && pnpm build` 全绿。
-- [ ] **Step 2:** 死引用扫描（应全部为空）：
+- [x] **Step 1:** `pnpm typecheck && pnpm test && pnpm build` 全绿。
+- [x] **Step 2:** 死引用扫描（应全部为空）：
 
 ```bash
 grep -rn "synthesizeLegacyPolicy\|guestPolicy\|GuestToolPolicy\|messageReplyMigrated\|codexBinary\|codexModel\|legacyPaths\|handleTimeout\|account-cards\|handleAccount\|CommentEvent\|routeComment\|addCommentReaction\|schtasks" src scripts --include="*.ts"
 ```
 
-- [ ] **Step 3:** `pnpm test:guest --model <常用模型>`（访客沙箱回归，确认 profile 封锁不受影响；需要真实 omp 环境，跑不了就标注跳过原因）。
-- [ ] **Step 4:** 冒烟：`node dist/cli.js --help` 确认无 `migrate` 子命令；构造含 `guestPolicy` 的临时 config 启动应报迁移错误。
-- [ ] **Step 5:** `git commit`（若有残余修补），汇报分支就绪。
+- [ ] **Step 3:** `pnpm test:guest --model <常用模型>`（访客沙箱回归，确认 profile 封锁不受影响；需要真实 omp 环境，跑不了就标注跳过原因）。**跳过**：无可用的真实 omp 环境执行此回归。
+- [x] **Step 4:** 冒烟：`node dist/cli.js --help` 确认无 `migrate` 子命令；构造含 `guestPolicy` 的临时 config 启动应报迁移错误。
+- [ ] **Step 5:** `git commit`（若有残余修补），汇报分支就绪。本轮终审修复见 `.superpowers/sdd/task-10-report.md`「Final-review fix round」。
 
 ## Self-Review 结论
 
