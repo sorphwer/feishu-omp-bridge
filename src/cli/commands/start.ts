@@ -8,6 +8,7 @@ import type { Controls } from '../../commands';
 import { setSecret } from '../../config/keystore';
 import type { AppConfig } from '../../config/schema';
 import {
+  assertNoLegacyPolicyFields,
   getOmpBinary,
   getOmpSessionDir,
   getOmpThinking,
@@ -65,6 +66,10 @@ export interface StartOptions {
 export async function runStart(opts: StartOptions): Promise<void> {
   const configPath = await resolveConfigPath(opts.config);
   const existing = await loadConfig(configPath);
+  // Fail fast on legacy config: silently ignoring a removed security-relevant
+  // field (guestPolicy / relay.route) would fail OPEN under the unified policy
+  // model, not fail closed — so reject the config outright rather than start.
+  assertNoLegacyPolicyFields(existing);
 
   let cfg: AppConfig;
   if (isComplete(existing)) {

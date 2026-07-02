@@ -121,36 +121,6 @@ export interface CommandToolConfig {
   maxCalls?: number;
 }
 
-/**
- * Sandboxes NON-trusted senders. When present, any sender NOT in
- * `unrestrictedUsers` runs OMP with a hard tool allowlist (a fail-closed
- * `tool_call` hook), discovery sources disabled, and only the declared
- * `commandTools` available — so a stranger DMing the bot can drive only the
- * whitelisted CLIs, never bash / eval / MCP / file tools. Trusted senders
- * (the operator) are completely unaffected and keep the full tool set.
- *
- * Absent = feature off: everyone gets the normal full tool set (back-compat).
- */
-export interface GuestToolPolicy {
-  /** Senders exempt from the sandbox (full tools). Falls back to `access.admins` when unset. */
-  unrestrictedUsers?: string[];
-  /** CLIs exposed to guests as host tools (their only execution surface). */
-  commandTools?: CommandToolConfig[];
-  /** Extra builtin tool names guests may also call (e.g. "read"). Default: none. */
-  extraToolAllowlist?: string[];
-  /** Expose the Feishu host tools (send/reply/get message) to guests. Default false. */
-  feishuHostTools?: boolean;
-  /** Total tool calls allowed per run (turn) across ALL tools. Unset/0 = no total cap. */
-  maxToolCalls?: number;
-  /**
-   * System-prompt text PREPENDED to the guest user prompt — gives the
-   * sandboxed agent its role/instructions without affecting trusted users.
-   * Empty/unset = none. (Prepended, not `--append-system-prompt`, which hung
-   * the codex request.)
-   */
-  systemPrompt?: string;
-}
-
 export interface AppPreferences {
   /** OMP executable name or path. Default: omp. */
   ompBinary?: string;
@@ -208,8 +178,6 @@ export interface AppPreferences {
   requireMentionInGroup?: boolean;
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
-  /** Per-sender tool sandbox for non-trusted senders. See GuestToolPolicy. */
-  guestPolicy?: GuestToolPolicy;
   /**
    * Grace period (ms) between SIGTERM and SIGKILL when killing the OMP
    * subprocess. Bumped from a hardcoded 500ms because agents often have
@@ -245,13 +213,6 @@ export interface RelayConfig {
    * `https://your-server.example`. The ONE field a worker must set.
    */
   endpoint?: string;
-  /**
-   * `front`: which senders (open_id) are relayed to a worker. Falls back to a
-   * non-empty `guestPolicy.unrestrictedUsers`, then non-empty `access.admins`.
-   * Empty/unset everywhere = relay NOBODY (fail-safe — never relay strangers
-   * to your laptop). Untrusted senders stay on the front (guest sandbox).
-   */
-  route?: { users?: string[] };
   /** Stable id for this worker (shown in logs; multi-worker future). Default: hostname. */
   workerId?: string;
   /**
@@ -399,7 +360,7 @@ export interface AppConfig {
   secrets?: SecretsConfig;
   preferences?: AppPreferences;
   relay?: RelayConfig;
-  /** Unified principals/profiles/rules. Absent = synthesized from legacy fields. */
+  /** Unified principals/profiles/rules. Absent = built-in open default (everyone full, no relay). */
   policy?: PolicyConfig;
 }
 
@@ -544,57 +505,9 @@ export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   return clamped * 60_000;
 }
 
-/**
- * The guest sandbox policy, or undefined when the feature is off. When
- * present, senders not on the trusted list run OMP in a hard-allowlisted
- * sandbox (see GuestToolPolicy).
- */
-export function getGuestPolicy(cfg: AppConfig): GuestToolPolicy | undefined {
-  const p = cfg.preferences?.guestPolicy;
-  return p && typeof p === 'object' ? p : undefined;
-}
-
-/**
- * True when `senderId` is NOT sandboxed: either the feature is off, or the
- * sender is on the trusted exemption list. Trusted list falls back to
- * `access.admins` when `unrestrictedUsers` is unset. When a policy is present
- * but no trusted list resolves, nobody is exempt (fail-safe: lock rather than
- * silently exempt everyone). Equivalently, `!isUnrestrictedUser(...)` means
- * "apply the guest sandbox to this sender".
- */
-export function isUnrestrictedUser(cfg: AppConfig, senderId: string): boolean {
-  const policy = getGuestPolicy(cfg);
-  if (!policy) return true;
-  const list = policy.unrestrictedUsers ?? cfg.preferences?.access?.admins;
-  if (!list || list.length === 0) return false;
-  return list.includes(senderId);
-}
-
 /** The relay config, or undefined when relay is off (standalone bridge). */
 export function getRelayConfig(cfg: AppConfig): RelayConfig | undefined {
   return cfg.relay;
-}
-
-/**
- * The open_id set the front relays to a worker. Explicit `relay.route.users`
- * wins; otherwise falls back to a NON-EMPTY `unrestrictedUsers`, then NON-EMPTY
- * `admins`. Empty everywhere = relay nobody (fail-safe: an unset trust list
- * must never mean "relay everyone to the laptop").
- */
-export function relayTrustedUsers(cfg: AppConfig): string[] {
-  const route = cfg.relay?.route?.users?.filter(Boolean);
-  if (route && route.length > 0) return route;
-  const unrestricted = cfg.preferences?.guestPolicy?.unrestrictedUsers?.filter(Boolean);
-  if (unrestricted && unrestricted.length > 0) return unrestricted;
-  const admins = cfg.preferences?.access?.admins?.filter(Boolean);
-  if (admins && admins.length > 0) return admins;
-  return [];
-}
-
-/** True when `senderId` should be relayed to a worker (and is non-empty). */
-export function isRelayTrusted(cfg: AppConfig, senderId: string | undefined): boolean {
-  if (!senderId) return false;
-  return relayTrustedUsers(cfg).includes(senderId);
 }
 
 const TOOL_NAME_RE = /^[a-zA-Z0-9_]+$/;
@@ -613,8 +526,8 @@ function clampInt(v: unknown, def: number, lo: number, hi: number): number {
 /**
  * Validate + normalize a raw `commandTools` array: drops entries with an
  * invalid name (must match /^[a-zA-Z0-9_]+$/) or empty command, dedupes by
- * name, and fills timeout/output defaults. Shared by the legacy `guestPolicy`
- * accessor and the unified `ProfileConfig` resolver (policy.ts).
+ * name, and fills timeout/output defaults. Shared by every profile's
+ * `commandTools` resolution (policy.ts).
  */
 export function normalizeCommandTools(raw: unknown): CommandToolConfig[] {
   if (!Array.isArray(raw)) return [];
@@ -646,38 +559,7 @@ export function normalizeCommandTools(raw: unknown): CommandToolConfig[] {
   return out;
 }
 
-/** Validated guest command-tool configs (legacy `guestPolicy.commandTools`). */
-export function getGuestCommandTools(cfg: AppConfig): CommandToolConfig[] {
-  return normalizeCommandTools(getGuestPolicy(cfg)?.commandTools);
-}
-
-/**
- * The hard allowlist of tool names a guest may call: command-tool names plus
- * any `extraToolAllowlist` entries (deduped). Enforced by the guest hook.
- */
-export function getGuestToolAllowlist(cfg: AppConfig): string[] {
-  const policy = getGuestPolicy(cfg);
-  if (!policy) return [];
-  const names = getGuestCommandTools(cfg).map((t) => t.name);
-  const extra = Array.isArray(policy.extraToolAllowlist)
-    ? policy.extraToolAllowlist.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())
-    : [];
-  return [...new Set([...names, ...extra])];
-}
-
-/** Whether guests may use the Feishu host tools. Default false. */
-export function getGuestFeishuHostTools(cfg: AppConfig): boolean {
-  return getGuestPolicy(cfg)?.feishuHostTools === true;
-}
-
-/** Guest-only system prompt to append, or undefined when unset/blank. */
-export function getGuestSystemPrompt(cfg: AppConfig): string | undefined {
-  const raw = getGuestPolicy(cfg)?.systemPrompt;
-  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
-  return raw;
-}
-
-/** Per-run (per-turn) tool-call caps enforced by the guest hook. */
+/** Per-run (per-turn) tool-call caps enforced by a restricted profile's hook. */
 export interface GuestToolLimits {
   /** Total tool calls allowed across all tools. 0 = no total cap. */
   maxTotal: number;
@@ -685,14 +567,21 @@ export interface GuestToolLimits {
   perTool: Record<string, number>;
 }
 
-/** Resolve guest tool-call caps from policy (total + per-command-tool). */
-export function getGuestToolLimits(cfg: AppConfig): GuestToolLimits {
-  const raw = getGuestPolicy(cfg)?.maxToolCalls;
-  const maxTotal =
-    typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
-  const perTool: Record<string, number> = {};
-  for (const t of getGuestCommandTools(cfg)) {
-    if (typeof t.maxCalls === 'number') perTool[t.name] = t.maxCalls;
+/**
+ * Legacy fields removed with the unified policy model. Fail FAST at startup —
+ * silently ignoring security-relevant config would fail open.
+ */
+export function assertNoLegacyPolicyFields(cfg: Partial<AppConfig>): void {
+  const offenders: string[] = [];
+  const prefs = cfg.preferences as Record<string, unknown> | undefined;
+  if (prefs && 'guestPolicy' in prefs) offenders.push('preferences.guestPolicy');
+  const relay = cfg.relay as Record<string, unknown> | undefined;
+  if (relay && 'route' in relay) offenders.push('relay.route');
+  if (offenders.length > 0) {
+    throw new Error(
+      `配置包含已移除的 legacy 字段：${offenders.join('、')}。` +
+        `请迁移到统一 policy（见 CONFIGURATION.zh.md §9）：` +
+        `guestPolicy → profiles + rules；relay.route.users → principals.<组>.run: "worker"。`,
+    );
   }
-  return { maxTotal, perTool };
 }

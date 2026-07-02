@@ -25,7 +25,7 @@ export interface RelaySink {
  * relayed to a worker. Each `route*` returns true when the event was handed
  * off (caller skips local handling) and false when it should run locally.
  *
- * Routing is purely by sender/operator trust (see {@link isRelayTrusted}).
+ * Routing is purely by sender/operator trust (see {@link relayRunTarget}).
  * That keeps guests local — they only ever interact with front-rendered cards,
  * so their card actions resolve on the front — while trusted users' messages
  * and the card clicks / comments they make are relayed to the worker. Follow-up

@@ -751,8 +751,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // (principals × scenario × first-match rules). The most-restrictive sender
   // wins, so one untrusted sender can't lift the batch. A profile with a
   // `tools` ARRAY is a sandbox (restricted built-ins + discovery/memory off +
-  // fail-closed hook); `full` keeps the whole tool set. Absent `policy`, this
-  // reproduces the legacy access/guest matrix. See config/policy.ts.
+  // fail-closed hook); `full` keeps the whole tool set. Absent `policy`, the
+  // built-in open default applies: everyone runs `full`, nothing relays. See
+  // config/policy.ts.
   const { profile, principals } = resolveBatchProfile(
     controls.cfg,
     batch.map((m) => m.senderId),
