@@ -8,6 +8,7 @@ import type { Controls } from '../../commands';
 import { setSecret } from '../../config/keystore';
 import type { AppConfig } from '../../config/schema';
 import {
+  assertNoLegacyPolicyFields,
   getOmpBinary,
   getOmpSessionDir,
   getOmpThinking,
@@ -65,6 +66,10 @@ export interface StartOptions {
 export async function runStart(opts: StartOptions): Promise<void> {
   const configPath = await resolveConfigPath(opts.config);
   const existing = await loadConfig(configPath);
+  // Fail fast on legacy config: silently ignoring a removed security-relevant
+  // field (guestPolicy / relay.route) would fail OPEN under the unified policy
+  // model, not fail closed — so reject the config outright rather than start.
+  assertNoLegacyPolicyFields(existing);
 
   let cfg: AppConfig;
   if (isComplete(existing)) {
@@ -185,6 +190,10 @@ export async function runStart(opts: StartOptions): Promise<void> {
       try {
         const next = await loadConfig(configPath);
         if (!isComplete(next)) throw new Error('config incomplete after change');
+        // Same fail-fast guard as the initial load in runStart(): a manual
+        // config.json edit during a running process must not silently
+        // resurrect a removed legacy field on reload (fail open).
+        assertNoLegacyPolicyFields(next);
         console.log(
           `[restart] connecting new bridge with appId=${next.accounts.app.id} tenant=${next.accounts.app.tenant}...`,
         );

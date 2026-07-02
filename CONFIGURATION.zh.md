@@ -22,14 +22,14 @@
 10. [配方库（copy → 改 open_id）](#10-配方库copy--改-open_id)
 11. [front/worker 路由与 `relay.secret`](#11-frontworker-路由与-relaysecret)
 12. [全字段速查（appendix）](#12-全字段速查appendix)
-13. [向后兼容（旧字段仍可用）](#13-向后兼容旧字段仍可用)
+13. [Legacy 字段已移除与迁移对照](#13-legacy-字段已移除与迁移对照)
 14. [校验、调试、常见坑](#14-校验调试常见坑)
 
 ---
 
 ## 1. 心智模型：星型三轴
 
-每条进来的事件（消息 / 卡片回调 / 文档评论），bot 都会问四件事。它们由 **三根命名的轴**（`principals` / `profiles` / `rules`）加上 principal 自带的 `run` 字段共同回答——这就是 `policy` 的全部：
+每条进来的事件（消息 / 卡片回调），bot 都会问四件事。它们由 **三根命名的轴**（`principals` / `profiles` / `rules`）加上 principal 自带的 `run` 字段共同回答——这就是 `policy` 的全部：
 
 ```mermaid
 flowchart TB
@@ -57,7 +57,7 @@ flowchart TB
 - **`policy` 的位置**：`config` 的**顶层段**，与 `accounts` / `preferences` / `relay` / `secrets` 平级。账号凭据（`accounts`）由首次扫码向导写入，你只需手写 `policy`（以及需要时的 `relay`）。
 - **改完必须整进程重启**：`bridge restart`（或 `node bin/feishu-omp-bridge.mjs restart`）。运行中的进程在**启动时快照**了配置。
   - ⚠️ `/reconnect` 只重连飞书长连接、**不重建 agent**，**不会**让 `policy` 生效。
-- **YAML 写回会丢注释**：`/account`、`/config` 等程序化改动会重序列化整个文件，**抹掉你手写的注释**。要保留注释就只手改、别用命令改。
+- **YAML 写回会丢注释**：`/config`、`/switch` 等程序化改动会重序列化整个文件，**抹掉你手写的注释**。要保留注释就只手改、别用命令改。
 
 最小骨架（JSON）：
 
@@ -98,7 +98,7 @@ policy:
 ```mermaid
 flowchart TD
   S(["sender open_id + 场景 chat + chatId"]) --> PO["principalOf:<br/>命中第一个含此 open_id 的组<br/>否则 = guest"]
-  PO --> RT["run = 该 principal 的 run 字段<br/>(guest 恒 front)"]
+  PO --> RT["run = 该 principal 的 run 字段<br/>(guest 恒 front)<br/>run=worker 时还要过 relayScenarios<br/>场景门控, 不命中则留 front (见 §11)"]
   PO --> LOOP{"遍历 rules<br/>首条 when 命中?"}
   LOOP -->|命中第 i 条| RP["resolveProfile(rule.profile)"]
   LOOP -->|无一命中| LK["fail-closed → locked<br/>(ruleIndex = -1)"]
@@ -111,7 +111,7 @@ flowchart TD
 - **身份只看 open_id**：`principalOf` 跳过保留名 `guest`，命中第一个 `users` 含该 open_id 的组；都没有就是 `guest`。
 - **rules 首条命中即停**：顺序重要（见 [§9](#9-轴三-rules--解析顺序--fail-closed)）。
 - **没命中任何 rule → `locked`**：显式 `policy` 是 **fail-closed**，宁可锁死也不放开（所以务必写兜底 rule）。
-- **三种入口都走这套**：普通消息、交互卡片回调、云文档评论（评论按 `group` 场景解析评论者）。
+- **两种入口都走这套**：普通消息、交互卡片回调（云文档评论管线已整体移除，@bot 评论不再触发任何响应）。
 
 ---
 
@@ -123,7 +123,9 @@ flowchart TD
 "principals": {
   "owner": ["ou_a"],                                  // 简写:只列成员, run 默认 front
   "team":  { "users": ["ou_b", "ou_c"], "run": "front" },
-  "me":    { "users": ["ou_a"], "run": "worker" }     // 这组的会话中继到 worker 跑
+  "me":    { "users": ["ou_a"], "run": "worker" },    // 这组的会话中继到 worker 跑
+  "home":  { "users": ["ou_d"], "run": "worker",
+             "relayScenarios": ["p2p"] }              // 只私聊去 worker,群聊留 front
 }
 ```
 
@@ -132,12 +134,13 @@ flowchart TD
 | 简写 | `string[]` | 等价于 `{ users: [...], run: "front" }`。 |
 | `users` | `string[]` | 该组成员的 open_id。空字符串会被清掉。 |
 | `run` | `"front"` \| `"worker"` | **按人**的运行端，默认 `front`。 |
+| `relayScenarios` | `("p2p"\|"group"\|"topic")[]` | 仅 `run: "worker"` 时生效：**只有列出的聊天场景**才中继到 worker，其余留在 front 跑。缺省 = 全部场景都中继。`"group"` 亦覆盖话题群。详见 [§11](#11-frontworker-路由与-relaysecret)。 |
 
 语义细节（都来自实现，别踩坑）：
 
 - **没列入任何组的人 = 隐式 `guest`**。`guest` 是**保留名**：你可以在 rule 里用 `principal: "guest"` 命中它，但**不能**在 `principals` 里重定义它（同名 key 会被解析跳过）。
 - **一个人只归一个组**：`principalOf` 取**第一个**含其 open_id 的组（按对象键顺序）。同一个 open_id 写进多个组时，靠前的赢。
-- **`run` 是 per-principal，不是 per-场景**：保证某人触发的交互卡片回调，落在最初渲染那张卡片的同一端。
+- **`run` 是 per-principal 的属性**：一个人要么整体 front、要么整体 worker。想再按聊天场景切分（如「私聊去笔记本、群聊留服务器」），用 `relayScenarios` 收窄——卡片回调经过**同一门控**，保证回调仍落在最初渲染那张卡片的同一端。
 - **`guest` 恒 `front`**：陌生人永不被中继到你的 worker（笔记本）。
 - **`run` 只在配了 relay 时有意义**：单机部署（无 `relay`）可完全忽略它。详见 [§11](#11-frontworker-路由与-relaysecret)。
 
@@ -356,7 +359,6 @@ bot 用 `spawn(command, [...args, ...模型args, ...appendArgs], { shell:false }
 
 语义：
 - 这组工具能**主动发消息/读任意消息 id**，所以默认只有全开型给 `true`、受限型给 `false`。受限 profile 要用得**显式** `"feishuHostTools": true`（白名单 hook 会自动把这 4 个名字纳入，否则会把你刚注册的 host tool 自己拦掉）。
-- **云文档评论入口没有飞书 host 集成**：评论场景只暴露 `commandTools`，不挂这 4 个 host tool（评论里没有「当前会话」可发）。
 
 ---
 
@@ -378,7 +380,7 @@ bot 用 `spawn(command, [...args, ...模型args, ...appendArgs], { shell:false }
 
 | `when` 字段 | 取值 | 匹配规则 |
 | --- | --- | --- |
-| `chat` | `"p2p"` \| `"group"` \| `"topic"`，或它们的数组 | **`"group"` 也匹配话题群 `topic`**；要单独区分话题群才写 `"topic"`。⚠️ 场景未知时（部分卡片/评论路由），**带 `chat` 的 rule 一律不命中**。 |
+| `chat` | `"p2p"` \| `"group"` \| `"topic"`，或它们的数组 | **`"group"` 也匹配话题群 `topic`**；要单独区分话题群才写 `"topic"`。注意 `"topic"` 只指**话题群**（建群时选的那种）；普通群即使开启了「话题」功能，policy 场景仍是 `group`（但会话照样按话题隔离，见 [§9.5](#95-会话线程scope--profile-两个维度)）。⚠️ `PolicyContext.chat` 的类型允许场景未知（`undefined`），此时**带 `chat` 的 rule 一律不命中**——这是防御性设计：现有代码路径（消息、卡片回调）在生产环境下都会先解析出具体场景才查 policy，云文档评论管线（曾是唯一恒传未知场景的入口）已整体移除。 |
 | `principal` | 身份组名（含 `"guest"`），或数组 | 发送者所属组名在表内才命中。 |
 | `chatId` | `string[]` | 限定到具体群 `chat_id`。p2p 的 chat_id 按用户对生成、**不用它门控**。 |
 | `profile` | profile 名 | 要应用的 profile（`profiles` 的 key，或内置 `full` / `locked`）。 |
@@ -421,27 +423,54 @@ flowchart TD
 ```
 
 - **关键保证**:活跃 run 是用某个 profile 的工具集 spawn 的。一个低权限成员在高权限者回复期间插话,**不会**被塞进那个高权限进程——除非他自己解析出的 profile 名与活跃 run **完全相同**。否则消息被延后,在当前 run 结束后按他本人的 profile 另起一轮。`steer` 与 `follow_up` 同规则。
-- **会话也按 profile 隔离**:OMP 会话按 `(scope, profile)` 存。低权限者即便在 run 结束后接着发言,也只 resume 自己那档的会话,**不会继承**高权限对话的历史上下文;每一档在同一个群里各留各的线程。
-- **云文档评论同理**:评论者按 `group` 场景解析 profile,会话按 `(doc, profile)` 隔离。
+- **消息不会丢**:如果门控通过、但注入的一瞬间 run 恰好结束了(竞态),消息自动回落待处理队列,按正常去抖成批执行。
+- **会话也按 profile 隔离**:OMP 会话按 `(scope, profile)` 存。低权限者即便在 run 结束后接着发言,也只 resume 自己那档的会话,**不会继承**高权限对话的历史上下文;每一档在同一个群里各留各的线程(用户可见行为见 [§9.5](#95-会话线程scope--profile-两个维度))。
 
-#### 9.3.2 卡片顶部的 profile 徽标
+#### 9.3.2 回复顶部的 profile 徽标
 
-群聊 / 话题群里,bot 回复卡片**顶部带一条带色 header**,标明这轮对话的工具档与发起者:
+群聊 / 话题群里,bot 的回复顶部带一个 **profile 徽标**,标明这轮对话的工具档与发起者:
 
-| profile | 徽标 | 颜色 |
-| --- | --- | --- |
-| `full` / 全开 | `🔓 full · @发起者` | 绿 |
-| 受限沙箱(`kb`/`readonly`…) | `🔒 kb（受限）· @发起者` | 蓝灰 |
-| `locked` | `⛔ locked` | 红 |
+| profile | 图标 + 标题 | 副标题 | header 颜色(card 模式) |
+| --- | --- | --- | --- |
+| `full` / 全开自定义 | `🔓 full` | `@发起者` | 绿 |
+| 受限沙箱(`kb`/`readonly`…) | `🔒 kb（受限）` | `@发起者` | 灰 |
+| `locked` / `locked(拼错名)` | `⛔ locked` | `@发起者` | 红 |
 
 徽标在 **run 启动时快照**(不是实时读配置),所以中途 `/config` 改动**不会**给一个已经跑起来的 run 贴上它并不持有的权限标签。它也解释了上面 ⏳ 表情的来历——插话者一眼能看出「这是 @某人 的 full 会话,我的消息排队稍后处理」。p2p 单人会话不显示徽标。
 
-- **回复模式差异**:带色 header 是**交互卡片**(`messageReply: card`)专属。默认的 `markdown` 模式没有标题栏,徽标改为**正文顶部一行**:`🔒 **guest（受限）** · @发起者`(🔓 full / 🔒 受限 / ⛔ locked,markdown 无颜色,用图标区分)。两种模式都能看到徽标;想要带色标题栏就把 `messageReply` 设成 `card`。
+- **回复模式差异**:带色 header 是**交互卡片**(`messageReply: card`)专属。默认的 `markdown` 模式没有标题栏,徽标改为**正文顶部一行**,如 `🔒 **guest（受限）** · @发起者`——markdown 无颜色,信任级别由图标承载(🔓 全开 / 🔒 受限 / ⛔ locked)。两种模式都能看到徽标;想要带色标题栏就把 `messageReply` 设成 `card`。
 
 ### 9.4 两条必记的安全语义
 
 - ⚠️ **显式 `policy` 是 fail-closed**：发送者未命中任何 rule、或 rule 指向**不存在**的 profile 名（拼写错也算）→ 跑 `locked`。**所以一定要写一条兜底 rule**（`{ "profile": "..." }`，`when` 省略）。
-- **不配 `policy` = 向后兼容**：见 [§13](#13-向后兼容旧字段仍可用)，按旧 `access`/`guestPolicy`/`relay.route` 自动合成，行为与改造前逐位一致。
+- **不配 `policy` = 内置开放默认**：见 [§13](#13-legacy-字段已移除与迁移对照)，等价于「人人 `full`、不中继」；旧 `guestPolicy`/`relay.route` 字段已从代码里删除，写了会在启动/`restart` 时直接报错拒绝，不会被静默丢弃或合成。
+
+### 9.5 会话线程：scope × profile 两个维度
+
+上面的 profile 决定「用什么工具」；bot 记住上下文（可 resume 的 OMP 会话）则按**两个正交维度**分线程——先按聊天位置切出 **scope**，scope 内再按 **profile 名**各留一条：
+
+```mermaid
+flowchart TD
+  MSG(["一条入站消息"]) --> TH{"消息带 thread_id?<br/>(话题群 或 开启「话题」功能的普通群)"}
+  TH -->|"是"| ST["scope = chatId:threadId<br/>(每个话题独立)"]
+  TH -->|"否 (p2p / 无话题普通群)"| SC["scope = chatId"]
+  ST --> ISO["该 scope 独享一整套状态:<br/>会话 · cwd · 待处理队列 · 活跃 run"]
+  SC --> ISO
+  ISO --> PROF["scope 内再按 profile 分会话线程:<br/>full 一条 · 每个受限档各一条<br/>互不共享上下文"]
+```
+
+**scope（聊天位置）**：
+
+- p2p、未开话题的普通群：scope = 整个 chat。
+- **任何带 `thread_id` 的消息**——话题群，**以及开启了「话题」功能的普通群**——scope = `chat:话题`。每个话题都是独立会话：各自的上下文、各自的 `/cd` 工作目录、各自的消息队列、各自可以同时跑一个 run，bot 的回复也自动落在同一话题里。`/status` 在这种 scope 下会标注「（话题独立 session）」。
+
+**profile（权限档）**：
+
+- 同一个 scope 里，`full` 层级与每个受限层级**各自维护**一条会话线程（见 [§9.3.1](#931-回复期间插话同-profile-才能注入)），低权限档永远接不上高权限档的历史。
+- `/status` 显示的是该 scope **最近活跃**那一档的会话（跨档取最新更新的那条）。
+- `/new`（`/reset`）、`/cd`、`/ws use` 是 scope 级操作：**一次清空该 scope 全部档**的会话线程——「重开」对所有权限层级同时生效。
+- **升级提示**：旧版本的会话存储不区分权限档。升级后首次启动，旧会话会被**一次性丢弃**（无法确认它们创建时的权限档，错档 resume 会泄露上下文）——效果等同所有 chat 都执行了一次 `/new`。
+- **自愈**：如果要 resume 的 OMP 会话已在磁盘上丢失（被清理/过期），bot 会自动清掉该档的记录，并用全新会话**在同一张卡片里**重试一次——用户无感，只是这一轮少了历史上下文（其余档的会话不受影响）。
 
 ---
 
@@ -451,7 +480,7 @@ flowchart TD
 
 ### 配方 0 · 什么都不配
 
-不写 `policy`、不写 `guestPolicy`：**所有人全开**（向后兼容）。生产环境不建议。
+不写 `policy`：**所有人全开、不中继**（内置 `DEFAULT_OPEN_POLICY`，见 [§13](#13-legacy-字段已移除与迁移对照)）。生产环境不建议。
 
 ### 配方 1 · 只有我全开，别人只读（最常见）
 
@@ -600,16 +629,17 @@ hook 文件写法见 [§5.5](#55-extensions--挂你自己的-hook)。
 
 ## 11. front/worker 路由与 `relay.secret`
 
-一台常开 **front**（服务器）持唯一飞书长连接；把某些人的会话**中继**到 **worker**（你笔记本）跑全工具，其余人留在 front 走沙箱。**路由按人**（`principal.run`）：
+一台常开 **front**（服务器）持唯一飞书长连接；把某些人的会话**中继**到 **worker**（你笔记本）跑全工具，其余人留在 front 走沙箱。**路由按人**（`principal.run`），可再按**聊天场景**收窄（`relayScenarios`）：
 
 ```mermaid
 flowchart LR
   EV["飞书事件<br/>(front 持唯一长连接)"] --> Q{"sender 的 principal.run?"}
-  Q -->|front| LOCAL["front 本地按 profile 跑"]
-  Q -->|worker| RELAY["中继到 worker(笔记本)<br/>worker 反向拨入 HTTP/SSE"]
+  Q -->|"front (guest 恒 front)"| LOCAL["front 本地按 profile 跑"]
+  Q -->|worker| SG{"relayScenarios 场景门控<br/>(缺省 = 全部场景)"}
+  SG -->|"场景在表内"| RELAY["中继到 worker(笔记本)<br/>worker 反向拨入 HTTP/SSE"]
+  SG -->|"场景不在表内"| LOCAL
   RELAY --> WRUN["worker 按 profile 跑<br/>(用同一 app 凭据回写飞书)"]
   RELAY -.->|worker 掉线| LOCAL
-  GUEST["guest 恒 front"] --> LOCAL
 ```
 
 **front 机器**（`config.json`）：
@@ -619,7 +649,7 @@ flowchart LR
   "accounts": { "app": { "id": "cli_xxx", "secret": "…", "tenant": "feishu" } },
   "relay": { "role": "front", "listen": "127.0.0.1:8787" },
   "policy": {
-    "principals": { "owner": { "users": ["ou_我"], "run": "worker" } },
+    "principals": { "owner": { "users": ["ou_我"], "run": "worker" } },   // 可加 "relayScenarios": ["p2p"]
     "profiles": { "kb": { "tools": [], "commandTools": [ /* … */ ] } },
     "rules": [
       { "when": { "principal": "owner" }, "profile": "full" },
@@ -639,10 +669,38 @@ flowchart LR
 ```
 
 要点：
-- **路由按人**：`owner.run: "worker"` → 他的消息/卡片/评论中继到 worker；其余人（含 `guest`，恒 front）留 front 跑 `kb`。
+- **路由按人**：`owner.run: "worker"` → 他的消息/卡片操作中继到 worker；其余人（含 `guest`，恒 front）留 front 跑 `kb`。
 - **profile 在实际执行端解析应用**：owner 的会话在 worker 上以 `full` 跑，front 永不跑 owner 的会话。
 - **安全边界 = TLS**：`endpoint` 用 `https://`；明文 `http://` 会告警（中间人可伪造事件驱动你本地全工具 agent）。
 - **掉线兜底**：worker 不在线时 front 本地降级处理（不丢消息）。
+
+### 11.1 `relayScenarios` — 按聊天场景收窄中继
+
+典型场景：worker 是你的**个人笔记本**——私聊时你想在笔记本上全工具跑，但群聊协作不该依赖你的笔记本是否开着盖。给 `run: "worker"` 的 principal 加 `relayScenarios`，只把列出的场景送去 worker，其余留在常驻 front：
+
+```yaml
+policy:
+  principals:
+    owner:
+      users: [ou_我]
+      run: worker
+      relayScenarios: [p2p]     # 只有私聊中继到 worker;群聊/话题留在 front
+  profiles:
+    kb: { tools: [], commandTools: [] }
+  rules:
+    - when: { principal: owner }
+      profile: full
+    - profile: kb
+```
+
+效果：你私聊 bot → 笔记本上全工具跑；你在群里 @bot → 常驻 front 处理（profile 照常按 rules 解析，本例仍是 `full`，只是跑在 front 上）。
+
+语义细节：
+
+- **缺省 = 全中继**：不写 `relayScenarios`，该 principal 的所有场景都去 worker（老行为不变）。显式写 `[]`（或全是非法值被过滤成空）= **什么都不中继**，全部留 front。
+- **`"group"` 亦覆盖话题群**：与 rules 的 `chat` 匹配同一规则。⚠️ 别试图单写 `["topic"]` 来只中继话题群——消息路由时话题群按 `group` 场景处理，`["topic"]` 无法可靠命中；要覆盖话题群就写 `"group"`。
+- **卡片回调走同一门控**：front 收到卡片点击时会先解析该 chat 的场景（有缓存）再判定——保证回调落在**渲染这张卡片**的那一侧（p2p 卡片在 worker 渲染 → 点击也去 worker；群卡片在 front 渲染 → 点击也在 front 处理，⏹ 停止按钮才能停到正确进程）。
+- **`run: "front"` 时忽略**：该字段只对 worker-bound principal 有意义。
 
 **`relay.secret`（解耦「能连 relay」与 Feishu App Secret）**：两端默认共用 App Secret 派生 HMAC（零配置）。要单独管理 relay 凭据，在两端同时设 `relay.secret`，两端必须一致。它支持和 App Secret 同样的**密钥引用形态**：
 
@@ -662,10 +720,13 @@ flowchart LR
 
 ```
 policy
-├─ principals: Record<name, string[] | { users: string[]; run?: "front"|"worker" }>
+├─ principals: Record<name, string[] | { users: string[]; run?: "front"|"worker";
+│                                        relayScenarios?: ("p2p"|"group"|"topic")[] }>
 │     • 简写 string[] = { users, run:"front" }
 │     • 保留名 guest = 任何未列入者(不可重定义)
 │     • run: per-principal; guest 恒 front; 仅 relay 下有意义
+│     • relayScenarios: 仅 run:"worker" 时生效; 列出的场景才中继, 缺省=全部
+│         "group" 亦覆盖 topic; 场景未知(防御性分支,现无生产路径触发)不满足显式限制; 卡片回调同门控
 ├─ profiles: Record<name, ProfileConfig>   // 内置 full / locked 恒存在
 │     ProfileConfig:
 │       tools?: "all" | string[]           // 数组⇒受限沙箱; "all"/省略⇒全开
@@ -692,24 +753,39 @@ CommandToolConfig:
 
 ---
 
-## 13. 向后兼容（旧字段仍可用）
+## 13. Legacy 字段已移除与迁移对照
 
-**不设 `policy` 时**，bot 用旧字段自动合成等价策略，行为与改造前逐位一致——你不必迁移：
+本仓库早期版本支持从旧 `preferences.guestPolicy` / `relay.route` 字段**自动合成**等价 `policy`（`synthesizeLegacyPolicy`）。该合成器已经从代码里删除——现在的规则很简单：
 
-```mermaid
-flowchart TD
-  CFG["cfg.policy 缺省"] --> GP{"有 guestPolicy?"}
-  GP -->|否| ALL["人人 full<br/>relay 名单 → principal relay (run worker)"]
-  GP -->|是| SYN["full 名单 = unrestrictedUsers ?? access.admins<br/>guestPolicy 翻译成受限 guest profile<br/>规则: (p2p 且 full 名单) → full, 其余 → guest"]
+- **不设 `policy`** → 走内置开放默认 `DEFAULT_OPEN_POLICY`：`principals: {}`、`profiles: {}`、`rules: [{ profile: "full" }]`，等价于「人人 `full`、不中继」。
+- **配置里仍出现 `preferences.guestPolicy` 或 `relay.route`** → 启动（`bridge run` / `bridge start`）和运行中的 `controls.restart()`（`/reconnect`、keepalive 强制重连都会走它）都会先跑 `assertNoLegacyPolicyFields(cfg)`：命中即**直接抛错拒绝启动/重连**，不会静默忽略、也不会回退合成——因为静默放行一个曾经承载访问控制语义的字段等于**悄悄放开权限**（fail OPEN），这在安全相关配置上是不可接受的。
+- **`preferences.access`（`allowedUsers`/`allowedChats`/`admins`）不受影响**：它不是被合成的对象，是独立于 `policy` 之外、始终生效的粗门控（先决定「能不能进来」，再由 `policy` 决定「能用什么工具」），继续按原样使用。
+
+报错文案示例（`assertNoLegacyPolicyFields`，`src/config/schema.ts`）：
+
+```
+配置包含已移除的 legacy 字段：preferences.guestPolicy。请迁移到统一 policy（见 CONFIGURATION.zh.md §13）：
+guestPolicy → profiles + rules；relay.route.users → principals.<组>.run: "worker"。
 ```
 
-旧字段：
+两个字段都命中时用顿号列出：`preferences.guestPolicy、relay.route`。
 
-- `preferences.access.{allowedUsers,allowedChats,admins}` — 粗门控（谁能进、哪些群、谁能跑 admin 命令）。**与 `policy` 正交，始终生效**（先决定能不能进来，再由 policy 决定工具模式）。
-- `preferences.guestPolicy.{unrestrictedUsers,commandTools,extraToolAllowlist,feishuHostTools,maxToolCalls,systemPrompt}` — 旧「访客沙箱」：信任用户（`unrestrictedUsers`，未设回落 `access.admins`）私聊全开，其余人 + 所有群一律沙箱。
-- `relay.route.users` — 中继名单。
+### 迁移对照表
 
-**一旦你写了 `policy`，它就是权威**（旧 `guestPolicy` 的沙箱逻辑被 `policy` 取代，但 `access` 仍生效）。迁移建议：保留 `access` 不动；把 `guestPolicy` 翻译成一个受限 `profile` + 对应 rules（参考 [配方 2](#配方-2--群聊给受限工具我私聊全开陌生人锁死)）。
+| 旧字段 | 现状 | 新写法 |
+| --- | --- | --- |
+| 不设 `guestPolicy`（旧默认全开） | 行为不变 | 不设 `policy`，等价内置开放默认 |
+| `guestPolicy.unrestrictedUsers` | 已删除 | 建一个 principal（如 `owner: ["ou_..."]`），配一条 `{ when: { principal: "owner" }, profile: "full" }` |
+| `guestPolicy.commandTools` | 已删除 | 挪进某个受限 profile 的 `commandTools` |
+| `guestPolicy.extraToolAllowlist` | 已删除 | 挪进受限 profile 的 `tools`（数组形式，如 `["read","search"]`） |
+| `guestPolicy.feishuHostTools` | 已删除 | 挪进受限 profile 的 `feishuHostTools` |
+| `guestPolicy.maxToolCalls` | 已删除 | 挪进受限 profile 的 `maxToolCalls` |
+| `guestPolicy.systemPrompt` | 已删除 | 挪进受限 profile 的 `systemPrompt` |
+| `relay.route.users` | 已删除 | 对应 principal 设 `run: "worker"`，如 `principals.owner = { users: [...], run: "worker" }` |
+| 无 `relay.route` 时回落 `access.admins` 自动中继 | 已删除（无替代回落链） | 显式给对应 principal 设 `run: "worker"`；`relay: {role:'front'}` 配合非空 `access.admins` 但没有任何 `run:"worker"` principal 时，bot 会在启动时打印一条 `no-worker-principal` 警告（非致命）提醒补上 |
+| `preferences.access.{allowedUsers,allowedChats,admins}` | **保留，未变** | 原样使用；与 `policy` 正交，始终生效 |
+
+一份完整「群聊受限、我私聊全开、陌生人锁死」的等价写法见 [配方 2](#配方-2--群聊给受限工具我私聊全开陌生人锁死)；`run: "worker"` 中继的完整写法见 [§11](#11-frontworker-路由与-relaysecret)。
 
 ---
 
@@ -718,11 +794,14 @@ flowchart TD
 - **本地回归**：`pnpm test:guest`（加 `--model` 跑真实模型越权测试）——对你**真实的** `config` 验证：信任用户全开 / 陌生人进沙箱、危险内置被移除、command tool 注入成功、shell 注入被挡、白名单外子命令被拒、canary 工具不泄漏。
 - **改了不生效**？`policy` 改动要 `restart`，不是 `/reconnect`。
 - **某些人被意外锁死**？显式 `policy` fail-closed——补一条兜底 rule（`when` 省略）。
-- **rule 写了 `chat` 却不命中**？卡片/评论等**场景未知**时，带 `chat` 的 rule 一律不命中——把不依赖场景的 rule 放后面兜底。
+- **rule 写了 `chat` 却不命中**？场景未知时（`PolicyContext.chat === undefined`），带 `chat` 的 rule 一律不命中——把不依赖场景的 rule 放后面兜底。
 - **拼错 profile 名**？指向不存在的 profile = `locked(<名>)` 锁死；查日志 `policy unknown-profile`。
 - **群里点卡片/按钮没反应**？卡片回调按发送者身份路由；确认操作者在对应 principal 里、且 `access.allowedUsers` 没把他挡在外面。
 - **全开 profile 的 `maxToolCalls`/`maxCalls` 不生效**？上限只在**受限** profile 由 hook 强制——把该 profile 的 `tools` 改成数组。
 - **worker 反复 401**？两端 `relay.secret` 不一致，或都没设但 App Secret 不同。
+- **配了 `run: "worker"` 但群聊没被中继**？看该 principal 的 `relayScenarios` 是不是只写了 `["p2p"]`——只有列出的场景才去 worker。要覆盖话题群写 `"group"`（别单写 `"topic"`，见 [§11.1](#111-relayscenarios--按聊天场景收窄中继)）。
+- **升级后 bot「失忆」**？会话存储从「每 chat 一条」升级为「每 (chat, 权限档) 一条」，旧记录无法确认创建档位、首次启动被一次性丢弃（等效所有 chat 执行了 `/new`）。一次性的，之后不会再发生。
+- **日志出现 `session resume-miss-retry`**？正常自愈：要 resume 的 OMP 会话已丢失时，bot 自动清掉该档记录并用全新会话在同一张卡片里重试，用户无感（仅该档丢历史上下文）。
 - **访客还能看到 `node_repl` / MCP 工具名**？那是「可见面」；真正的边界是 fail-closed hook——白名单外的调用在执行时被拦（`pnpm test:guest --model` 验证 canary 不泄漏）。
 - **沙箱产物在哪**？`~/.feishu-omp-bridge/guest/<内容签名>/`（overlay + hook，自动维护、按 profile 内容分目录）。
 

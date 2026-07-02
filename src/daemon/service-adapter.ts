@@ -1,6 +1,5 @@
 import * as launchd from './launchd';
-import { WINDOWS_TASK_NAME, launchAgentPlistPath, systemdUnitPath } from './paths';
-import * as schtasks from './schtasks';
+import { launchAgentPlistPath, systemdUnitPath } from './paths';
 import * as systemd from './systemd';
 
 export interface ServiceResult {
@@ -8,13 +7,13 @@ export interface ServiceResult {
   stderr: string;
 }
 
-/** Some platforms' restart is sync (spawnSync), others (schtasks) are
- * naturally async. Adapter methods can return either; callers await. */
+/** Some platforms' restart is sync (spawnSync), others are naturally
+ * async. Adapter methods can return either; callers await. */
 export type ServiceResultLike = ServiceResult | Promise<ServiceResult>;
 
 /**
- * Platform-agnostic interface over OS service managers (launchd / systemd /
- * schtasks). All methods are best-effort idempotent — calling stop()
+ * Platform-agnostic interface over OS service managers (launchd / systemd).
+ * All methods are best-effort idempotent — calling stop()
  * on an already-stopped service returns ok=true.
  */
 export interface ServiceAdapter {
@@ -116,47 +115,23 @@ function makeSystemdAdapter(): ServiceAdapter {
   };
 }
 
-function makeSchtasksAdapter(): ServiceAdapter {
-  return {
-    platformName: 'Task Scheduler (Windows)',
-    fileExists: schtasks.isTaskRegistered,
-    isRunning: schtasks.isTaskRunning,
-    // Windows doesn't have a single "service file" — there's the task
-    // registration (queryable via schtasks) and the launcher .cmd we wrote.
-    // The task name is what the user would search for in Task Scheduler UI.
-    servicePath: () => WINDOWS_TASK_NAME,
-    install: async () => {
-      const r = await schtasks.installTask();
-      if (!r.ok) throw new Error(r.stderr || 'schtasks /Create failed');
-    },
-    start: schtasks.runTask,
-    stop: schtasks.endTask,
-    stopAndDisableAutostart: schtasks.endAndDisable,
-    // schtasks has no native /Restart — adapter awaits end+wait+run.
-    restart: schtasks.restartTask,
-    waitUntilStopped: schtasks.waitUntilStopped,
-    deleteFile: async () => {
-      await schtasks.deleteTask();
-    },
-    describeStatus: schtasks.describeTask,
-    parseStatus: (text) => ({
-      // `Process ID: <n>` shows up in verbose listing only when task is running.
-      pid: text.match(/Process ID:\s*(\d+)/i)?.[1],
-      // `Last Result: <0|nonzero>` — `0` means last run succeeded.
-      // Filter the `1056` ("task already running") and `267011` ("task hasn't
-      // run") sentinels that aren't real exit codes.
-      lastExit: text.match(/Last Result:\s*(\d+)/i)?.[1],
-    }),
-  };
-}
-
 /**
  * Return the right adapter for the current platform, or null if this OS
  * isn't supported. Callers should null-check and surface a friendly error.
+ *
+ * Windows (Task Scheduler) support was removed — its lack of a native
+ * restart primitive and its divergent status/exit-code reporting made it
+ * a poor fit to keep maintaining alongside launchd/systemd. Throws instead
+ * of returning null so `win32` gets an explicit, actionable message instead
+ * of the generic "unsupported OS" fallback.
  */
 export function getServiceAdapter(): ServiceAdapter | null {
   if (process.platform === 'darwin') return makeLaunchdAdapter();
   if (process.platform === 'linux') return makeSystemdAdapter();
-  if (process.platform === 'win32') return makeSchtasksAdapter();
+  if (process.platform === 'win32') {
+    throw new Error(
+      'Windows 守护进程支持已移除；请前台运行 `feishu-omp-bridge run`，或用 WSL + systemd。',
+    );
+  }
   return null;
 }

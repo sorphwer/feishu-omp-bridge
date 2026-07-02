@@ -135,7 +135,7 @@ export async function saveConfig(cfg: AppConfig, path?: string): Promise<void> {
   await mkdir(dirname(resolved), { recursive: true });
   const tmp = `${resolved}.tmp-${process.pid}`;
   // Write in the resolved file's format. YAML round-trips drop hand-written
-  // comments — programmatic edits (/config, /account) reserialize the doc.
+  // comments — programmatic edits (/config) reserialize the doc.
   const text = isYamlPath(resolved) ? stringifyYaml(cfg) : `${JSON.stringify(cfg, null, 2)}\n`;
   await writeFile(tmp, text, 'utf8');
   // chmod the temp file before rename, so the destination path is never

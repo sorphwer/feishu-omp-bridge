@@ -19,10 +19,6 @@ export interface ScopeEntry {
    * session in the same chat — and each tier keeps its own thread.
    */
   sessions: Record<string, ProfileSession>;
-  /** Per-scope idle-timeout override (minutes). 0 = explicitly off for this
-   * scope, undefined = follow global default. Scope-level (not per-profile):
-   * /new clears the whole entry, resetting this to "follow global". */
-  idleTimeoutMinutes?: number;
   updatedAt: number;
 }
 
@@ -54,18 +50,16 @@ export class SessionStore {
 
   /**
    * Normalize a persisted entry into the current nested shape. Tolerates the
-   * legacy FLAT shape (`{ sessionId, cwd, updatedAt, idleTimeoutMinutes? }`):
-   * the flat session is DROPPED (its creating profile is unknown, and resuming
-   * it under the wrong profile would leak context) while a bare idle-timeout
-   * override is preserved. Returns undefined when nothing worth keeping remains.
+   * legacy FLAT shape (`{ sessionId, cwd, updatedAt }`): the flat session is
+   * DROPPED (its creating profile is unknown, and resuming it under the wrong
+   * profile would leak context). Returns undefined when nothing worth keeping
+   * remains (i.e. no resumable sessions survived migration).
    */
   private migrateEntry(value: unknown): ScopeEntry | undefined {
     if (!value || typeof value !== 'object') return undefined;
     const v = value as Record<string, unknown>;
     const updatedAt = typeof v.updatedAt === 'number' ? v.updatedAt : undefined;
     if (updatedAt === undefined) return undefined;
-    const idleTimeoutMinutes =
-      typeof v.idleTimeoutMinutes === 'number' ? v.idleTimeoutMinutes : undefined;
 
     const sessions: Record<string, ProfileSession> = {};
     if (v.sessions && typeof v.sessions === 'object') {
@@ -80,15 +74,9 @@ export class SessionStore {
         };
       }
     }
-    // Legacy flat entry: a session with no known profile — drop it (fail-safe),
-    // but keep the idle override if present.
-    const hasSessions = Object.keys(sessions).length > 0;
-    if (!hasSessions && idleTimeoutMinutes === undefined) return undefined;
-    return {
-      sessions,
-      ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
-      updatedAt,
-    };
+    // Legacy flat entry: a session with no known profile — drop it (fail-safe).
+    if (Object.keys(sessions).length === 0) return undefined;
+    return { sessions, updatedAt };
   }
 
   /**
@@ -122,60 +110,30 @@ export class SessionStore {
     const prev = this.data[scope];
     const now = Date.now();
     this.data[scope] = {
-      // Preserve sibling profiles' sessions and the scope idle override.
+      // Preserve sibling profiles' sessions.
       sessions: { ...(prev?.sessions ?? {}), [profile]: { sessionId, cwd, updatedAt: now } },
-      ...(prev?.idleTimeoutMinutes !== undefined
-        ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
-        : {}),
       updatedAt: now,
     };
     this.schedulePersist();
   }
 
-  /** Drop the WHOLE scope (all profiles' sessions + idle override). Used by
-   * /new, /cd, /ws — "fresh start for this chat" wipes every tier's thread. */
+  /** Drop the WHOLE scope (all profiles' sessions). Used by /new, /cd, /ws —
+   * "fresh start for this chat" wipes every tier's thread. */
   clear(scope: string): void {
     if (!(scope in this.data)) return;
     delete this.data[scope];
     this.schedulePersist();
   }
 
-  /** Drop only ONE profile's session in a scope (keep siblings + idle override).
-   * Used by the resume-miss retry so a stale/expired session for one tier can
-   * self-heal without wiping every other tier's thread. */
+  /** Drop only ONE profile's session in a scope (keep siblings). Used by the
+   * resume-miss retry so a stale/expired session for one tier can self-heal
+   * without wiping every other tier's thread. */
   clearProfile(scope: string, profile: string): void {
     const entry = this.data[scope];
     if (!entry || !(profile in entry.sessions)) return;
     delete entry.sessions[profile];
     entry.updatedAt = Date.now();
     this.schedulePersist();
-  }
-
-  /** Per-scope idle-timeout override. `undefined` means no override set. */
-  getIdleTimeoutMinutes(scope: string): number | undefined {
-    return this.data[scope]?.idleTimeoutMinutes;
-  }
-
-  setIdleTimeoutMinutes(scope: string, minutes: number): void {
-    const clamped = Math.min(Math.max(Math.floor(minutes), 0), 120);
-    const prev = this.data[scope];
-    this.data[scope] = {
-      sessions: prev?.sessions ?? {},
-      idleTimeoutMinutes: clamped,
-      updatedAt: Date.now(),
-    };
-    this.schedulePersist();
-  }
-
-  /** Remove the override so this scope falls back to the global default.
-   * Returns true if something was actually removed. */
-  clearIdleTimeoutOverride(scope: string): boolean {
-    const prev = this.data[scope];
-    if (!prev || prev.idleTimeoutMinutes === undefined) return false;
-    const { idleTimeoutMinutes: _, ...rest } = prev;
-    this.data[scope] = { ...rest, updatedAt: Date.now() };
-    this.schedulePersist();
-    return true;
   }
 
   async flush(): Promise<void> {

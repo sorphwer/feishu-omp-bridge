@@ -1,6 +1,5 @@
 import { Command } from 'commander';
 import pkg from '../../package.json';
-import { runMigrate } from './commands/migrate';
 import { runKillCli, runPs } from './commands/ps';
 import {
   runSecretsGet,
@@ -51,7 +50,7 @@ program
     await runKillCli(target);
   });
 
-// === service-level commands (OS-managed daemon: launchd/systemd/schtasks) ===
+// === service-level commands (OS-managed daemon: launchd/systemd; Windows unsupported) ===
 
 program
   .command('start')

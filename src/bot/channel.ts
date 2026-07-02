@@ -1,7 +1,6 @@
 import { homedir, hostname } from 'node:os';
 import type {
   CardActionEvent,
-  CommentEvent,
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
@@ -37,7 +36,7 @@ import {
   isChatAllowed,
   isUserAllowed,
 } from '../config/schema';
-import { injectionDecision, resolveBatchProfile } from '../config/policy';
+import { effectivePolicy, hasWorkerPrincipal, injectionDecision, resolveBatchProfile } from '../config/policy';
 import { resolveAppSecret, resolveRelaySecret } from '../config/secret-resolver';
 import { log, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
@@ -45,7 +44,6 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
-import { handleCommentMention } from './comments';
 import { buildCommandTools } from './command-tools';
 import { buildProfileRunArgs, type GuestRunArgs } from './guest-lockdown';
 import { createFeishuHostIntegration } from './feishu-host';
@@ -63,16 +61,6 @@ import { startRelayWorker } from '../relay/worker';
 
 const DEBOUNCE_MS = 600;
 
-// Lark SDK logs API errors at error level even when the caller catches them.
-// These specific codes are EXPECTED in our flow (wiki-node lookup that
-// usually misses, fileComment.get that we deliberately let fall back to
-// .list) and the surrounding noise is already covered by our own logs.
-const SUPPRESSED_API_ERROR_CODES = new Set([
-  131005, // wiki.space.getNode "not found" — the doc isn't a wiki node
-  1069307, // drive.fileComment.get "not exist" — fall back to .list
-  1069302, // drive.fileCommentReply.create — whole-doc comments don't accept replies; fall back to fileComment.create
-]);
-
 function buildQuietLogger(): {
   error: (...m: unknown[]) => void;
   warn: (...m: unknown[]) => void;
@@ -80,26 +68,8 @@ function buildQuietLogger(): {
   debug: (...m: unknown[]) => void;
   trace: (...m: unknown[]) => void;
 } {
-  // Match either `{ code: <feishu-code> }` (the response data SDK logs as
-  // its second arg) or an AxiosError where the feishu code lives at
-  // `err.response.data.code` (which the SDK logs raw).
-  const codeFromObj = (m: unknown): number | undefined => {
-    if (!m || typeof m !== 'object') return undefined;
-    const top = (m as { code?: unknown }).code;
-    if (typeof top === 'number') return top;
-    const nested = (m as { response?: { data?: { code?: unknown } } })?.response?.data?.code;
-    return typeof nested === 'number' ? nested : undefined;
-  };
-  const isSuppressed = (msg: unknown): boolean => {
-    if (Array.isArray(msg)) return msg.some(isSuppressed);
-    const code = codeFromObj(msg);
-    return code !== undefined && SUPPRESSED_API_ERROR_CODES.has(code);
-  };
   return {
-    error: (...args: unknown[]) => {
-      if (args.some(isSuppressed)) return;
-      log.warn('sdk', 'error', { args: stringifyArgs(args) });
-    },
+    error: (...args: unknown[]) => log.warn('sdk', 'error', { args: stringifyArgs(args) }),
     warn: (...args: unknown[]) => log.warn('sdk', 'warn', { args: stringifyArgs(args) }),
     info: (...args: unknown[]) => log.info('sdk', 'info', { args: stringifyArgs(args) }),
     debug: () => {},
@@ -179,14 +149,13 @@ function buildChannelOptions(
 
 /**
  * The per-instance message pipeline bound to one channel: intake → debounce →
- * run, plus card-action and comment handling. Both the front (driven by the
- * Feishu WS) and a worker (driven by relayed events) build one of these and
- * feed it events through the same three `dispatch*` entry points.
+ * run, plus card-action handling. Both the front (driven by the Feishu WS)
+ * and a worker (driven by relayed events) build one of these and feed it
+ * events through the same two `dispatch*` entry points.
  */
 export interface BridgeRuntime {
   dispatchMessage(msg: NormalizedMessage): Promise<void>;
   dispatchCardAction(evt: CardActionEvent): Promise<void>;
-  dispatchComment(evt: CommentEvent): Promise<void>;
   /** Shared chat-mode cache (p2p/group/topic). Reused by the relay router to
    * resolve a card action's scenario for per-principal `relayScenarios`. */
   readonly chatModeCache: ChatModeCache;
@@ -277,7 +246,6 @@ export function createBridgeRuntime(deps: BridgeRuntimeDeps): BridgeRuntime {
         pending,
         chatModeCache,
       }),
-    dispatchComment: (evt) => handleCommentMention({ channel, evt, agent, sessions, workspaces, cfg: controls.cfg }),
     shutdown: async () => {
       pending.cancelAll();
       await activeRuns.stopAll();
@@ -290,10 +258,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const { cfg, agent, sessions, workspaces, controls } = deps;
 
   // Apply network-layer overrides (HTTP timeout + proxy from env). Idempotent;
-  // safe to call on every startChannel (used by /account change hot-reload too).
+  // safe to call on every startChannel (used by controls.restart() hot-reload too).
   const netOverrides = configureNetwork();
   // Resolve the App Secret to plaintext. Re-resolved on every startChannel so
-  // /account change picks up new secrets. Also the relay HMAC key seed.
+  // a config-driven restart picks up new secrets. Also the relay HMAC key seed.
   const appSecret = await resolveAppSecret(cfg);
 
   const channel = createLarkChannel(buildChannelOptions(cfg, appSecret, netOverrides));
@@ -317,6 +285,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     });
     log.info('relay', 'front-ready', { address: relayServer.address });
     console.log(`relay front 已监听 ${relayServer.address}（worker 拨入此地址）\n`);
+
+    // Sanity warning, not a hard failure: a front with no worker-routed
+    // principal relays nobody. This used to auto-relay `access.admins` via a
+    // fallback chain (relay.route.users → guestPolicy.unrestrictedUsers →
+    // access.admins) that was removed with the unified policy model — a
+    // config carrying `relay: {role:'front'}` + non-empty `access.admins` but
+    // no `policy` now silently relays no one, which is a legitimate but easy
+    // to overlook config shape (e.g. relay configured before principals).
+    if (!hasWorkerPrincipal(effectivePolicy(cfg))) {
+      log.warn('relay', 'no-worker-principal', {});
+      console.warn(
+        "relay front 已配置，但 policy 未指定任何 run:'worker' 的 principal——不会中继任何人到 worker。旧 access.admins 自动中继已移除，见 CONFIGURATION.zh.md §13。",
+      );
+    }
   }
 
   // Counter for stdout reconnect escalation; reset on `reconnected`.
@@ -339,12 +321,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         if (await router?.routeCardAction(evt)) return;
         await runtime.dispatchCardAction(evt);
       }).catch((err) => log.fail('cardAction', err));
-    },
-    comment: async (evt) => {
-      await withTrace({ chatId: 'comment' }, async () => {
-        if (router?.routeComment(evt)) return;
-        await runtime.dispatchComment(evt);
-      }).catch((err) => log.fail('comment', err));
     },
     reconnecting: () => {
       consecutiveReconnects++;
@@ -472,8 +448,6 @@ export async function startWorker(deps: StartChannelDeps): Promise<BridgeChannel
           await runtime.dispatchMessage(event.payload as NormalizedMessage);
         } else if (event.kind === 'cardAction') {
           await runtime.dispatchCardAction(event.payload as CardActionEvent);
-        } else if (event.kind === 'comment') {
-          await runtime.dispatchComment(event.payload as CommentEvent);
         }
       }).catch((err) => log.fail('relay', err, { phase: 'inject', id: event.id }));
     },
@@ -500,7 +474,7 @@ export async function startWorker(deps: StartChannelDeps): Promise<BridgeChannel
 
 /** Start the bridge in the role configured by `relay.role` (worker vs the
  * default front/standalone WS bridge). Single entry point for runStart and
- * the /account hot-restart. */
+ * `controls.restart()`. */
 export async function startBridge(deps: StartChannelDeps): Promise<BridgeChannel> {
   return getRelayConfig(deps.cfg)?.role === 'worker' ? startWorker(deps) : startChannel(deps);
 }
@@ -751,8 +725,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // (principals × scenario × first-match rules). The most-restrictive sender
   // wins, so one untrusted sender can't lift the batch. A profile with a
   // `tools` ARRAY is a sandbox (restricted built-ins + discovery/memory off +
-  // fail-closed hook); `full` keeps the whole tool set. Absent `policy`, this
-  // reproduces the legacy access/guest matrix. See config/policy.ts.
+  // fail-closed hook); `full` keeps the whole tool set. Absent `policy`, the
+  // built-in open default applies: everyone runs `full`, nothing relays. See
+  // config/policy.ts.
   const { profile, principals } = resolveBatchProfile(
     controls.cfg,
     batch.map((m) => m.senderId),
@@ -836,15 +811,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       profile.name,
     );
 
-  // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
-  // over global default (preferences). 0 / undefined = no watchdog.
-  const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
-  const idleTimeoutMs =
-    scopeOverride !== undefined
-      ? scopeOverride > 0
-        ? scopeOverride * 60_000
-        : undefined
-      : getRunIdleTimeoutMs(controls.cfg);
+  // Resolve idle-timeout for this run from the global default (preferences).
+  // undefined = no watchdog.
+  const idleTimeoutMs = getRunIdleTimeoutMs(controls.cfg);
   if (idleTimeoutMs) {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }
@@ -919,11 +888,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   };
 
-  // For non-card modes OMP's output doesn't surface visually until either
-  // a first streamed token (markdown mode) or the whole run ends (text mode).
-  // Add a "Typing" reaction to the triggering message as an instant ack;
-  // remove it in finally. Card mode has a visible "正在思考…" footer the
-  // moment the initial card lands, so the extra reaction would be redundant.
+  // In markdown mode OMP's output doesn't surface visually until the first
+  // streamed token. Add a "Typing" reaction to the triggering message as an
+  // instant ack; remove it in finally. Card mode has a visible "正在思考…"
+  // footer the moment the initial card lands, so the extra reaction would be
+  // redundant.
   const reactionId =
     replyMode === 'card' ? undefined : await addReaction(channel, lastMsg.messageId);
 
@@ -943,7 +912,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         sendOpts,
       );
-    } else if (replyMode === 'markdown') {
+    } else {
       await channel.stream(
         chatId,
         {
@@ -955,18 +924,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         sendOpts,
       );
-    } else {
-      // text mode: drain the agent stream without sending anything during
-      // the run, then post the final rendered text once as a plain markdown
-      // (msg_type=post) message — no card, no streaming, no typewriter.
-      let finalState: RunState = runInitialState;
-      await driveAgent(async (state) => {
-        finalState = state;
-      });
-      const body = renderText(filterForPrefs(finalState));
-      if (body.trim()) {
-        await channel.send(chatId, { markdown: body }, sendOpts);
-      }
     }
   } catch (err) {
     log.fail('stream', err);

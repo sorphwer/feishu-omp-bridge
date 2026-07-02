@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -51,14 +51,6 @@ describe('SessionStore per-(scope, profile) keying', () => {
     expect(store.resumeFor('oc_1', '/work', 'kb')).toBe('sid-kb');
   });
 
-  it('preserves the idle-timeout override across session writes', () => {
-    store.setIdleTimeoutMinutes('oc_1', 15);
-    store.set('oc_1', 'sid-full', '/work', 'full');
-    expect(store.getIdleTimeoutMinutes('oc_1')).toBe(15);
-    store.clearProfile('oc_1', 'full');
-    expect(store.getIdleTimeoutMinutes('oc_1')).toBe(15);
-  });
-
   it('latestSession reports the most-recently written profile session', () => {
     // Force distinct timestamps so the tie-break is deterministic.
     vi.useFakeTimers();
@@ -77,22 +69,19 @@ describe('SessionStore per-(scope, profile) keying', () => {
 
   it('persists and reloads the nested shape', async () => {
     store.set('oc_1', 'sid-full', '/work', 'full');
-    store.setIdleTimeoutMinutes('oc_1', 10);
     await store.flush();
 
     const reloaded = new SessionStore(path);
     await reloaded.load();
     expect(reloaded.resumeFor('oc_1', '/work', 'full')).toBe('sid-full');
-    expect(reloaded.getIdleTimeoutMinutes('oc_1')).toBe(10);
   });
 
-  it('migrates a legacy flat entry: drops the unscoped session, keeps idle override', async () => {
+  it('migrates a legacy flat entry: drops the unscoped session', async () => {
     // Pre-refactor on-disk shape: session id/cwd at the top level.
     await writeFile(
       path,
       JSON.stringify({
-        oc_legacy: { sessionId: 'old-sid', cwd: '/work', updatedAt: 1, idleTimeoutMinutes: 20 },
-        oc_bare: { sessionId: 'bare-sid', cwd: '/work', updatedAt: 2 },
+        oc_legacy: { sessionId: 'old-sid', cwd: '/work', updatedAt: 1 },
       }),
       'utf8',
     );
@@ -101,9 +90,26 @@ describe('SessionStore per-(scope, profile) keying', () => {
     // Unscoped session can't be safely resumed under any profile → dropped.
     expect(migrated.resumeFor('oc_legacy', '/work', 'full')).toBeUndefined();
     expect(migrated.latestSession('oc_legacy')).toBeUndefined();
-    // The idle override survives the migration.
-    expect(migrated.getIdleTimeoutMinutes('oc_legacy')).toBe(20);
-    // A bare legacy session with nothing else worth keeping is dropped entirely.
-    expect(migrated.getIdleTimeoutMinutes('oc_bare')).toBeUndefined();
+  });
+
+  it('drops legacy entries that only carried an idle override', async () => {
+    // Pre-refactor on-disk shape: a scope with nothing but a stale idle
+    // override and no sessions at all — nothing worth keeping remains.
+    await writeFile(
+      path,
+      JSON.stringify({
+        chat1: { idleTimeoutMinutes: 30, updatedAt: 1 },
+      }),
+      'utf8',
+    );
+    const migrated = new SessionStore(path);
+    await migrated.load();
+    expect(migrated.latestSession('chat1')).toBeUndefined();
+    // Force a persist and confirm the legacy-only scope did not survive
+    // migration into the in-memory map at all (not just "empty sessions").
+    migrated.set('chat2', 'sid', '/work', 'full');
+    await migrated.flush();
+    const onDisk = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    expect(onDisk.chat1).toBeUndefined();
   });
 });

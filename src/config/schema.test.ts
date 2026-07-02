@@ -1,16 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
-  getGuestCommandTools,
-  getGuestFeishuHostTools,
-  getGuestPolicy,
-  getGuestSystemPrompt,
-  getGuestToolAllowlist,
+  assertNoLegacyPolicyFields,
+  getMessageReplyMode,
   getOmpBinary,
   getOmpModel,
   getOmpSessionDir,
   getOmpThinking,
   getOmpTools,
-  isUnrestrictedUser,
+  normalizeCommandTools,
   type AppConfig,
 } from './schema';
 
@@ -31,9 +28,11 @@ describe('OMP preferences', () => {
     expect(getOmpModel(cfg({ ompModel: ' gpt-5.5 ' }))).toBe('gpt-5.5');
   });
 
-  it('falls back to legacy Codex binary and model when OMP fields are absent', () => {
-    expect(getOmpBinary(cfg({ codexBinary: ' /opt/bin/codex ' }))).toBe('/opt/bin/codex');
-    expect(getOmpModel(cfg({ codexModel: ' gpt-5.1 ' }))).toBe('gpt-5.1');
+  it('ignores legacy codexBinary/codexModel aliases', () => {
+    const cfg1 = { preferences: { codexBinary: '/usr/bin/fake' } } as never;
+    expect(getOmpBinary(cfg1)).toBe('omp');
+    const cfg2 = { preferences: { codexModel: 'gpt-5.1' } } as never;
+    expect(getOmpModel(cfg2)).toBeUndefined();
   });
 
   it('omits empty optional OMP flags', () => {
@@ -49,43 +48,25 @@ describe('OMP preferences', () => {
   });
 });
 
-describe('guest tool policy', () => {
-  it('treats everyone as unrestricted when no policy is set', () => {
-    expect(getGuestPolicy(cfg())).toBeUndefined();
-    expect(isUnrestrictedUser(cfg(), 'ou_anyone')).toBe(true);
-    expect(getGuestToolAllowlist(cfg())).toEqual([]);
-    expect(getGuestCommandTools(cfg())).toEqual([]);
+describe('getMessageReplyMode', () => {
+  it('coerces removed text mode to markdown', () => {
+    const cfg = { preferences: { messageReply: 'text' } } as never;
+    expect(getMessageReplyMode(cfg)).toBe('markdown');
   });
 
-  it('exempts listed unrestricted users and sandboxes the rest', () => {
-    const c = cfg({ guestPolicy: { unrestrictedUsers: ['ou_owner'] } });
-    expect(isUnrestrictedUser(c, 'ou_owner')).toBe(true);
-    expect(isUnrestrictedUser(c, 'ou_stranger')).toBe(false);
+  it('defaults to markdown', () => {
+    expect(getMessageReplyMode({} as never)).toBe('markdown');
   });
+});
 
-  it('falls back to admins when unrestrictedUsers is unset', () => {
-    const c = cfg({ guestPolicy: {}, access: { admins: ['ou_owner'] } });
-    expect(isUnrestrictedUser(c, 'ou_owner')).toBe(true);
-    expect(isUnrestrictedUser(c, 'ou_stranger')).toBe(false);
-  });
-
-  it('exempts nobody when a policy is present but no trusted list resolves', () => {
-    const c = cfg({ guestPolicy: {} });
-    expect(isUnrestrictedUser(c, 'ou_owner')).toBe(false);
-  });
-
+describe('normalizeCommandTools', () => {
   it('validates command tools: drops bad names/commands, dedupes, fills defaults', () => {
-    const c = cfg({
-      guestPolicy: {
-        commandTools: [
-          { name: 'zendesk_kg', command: 'zendesk-kg', allowedSubcommands: ['search', 'stats'] },
-          { name: 'bad name', command: 'x' }, // invalid name (space)
-          { name: 'noCmd', command: '   ' }, // empty command
-          { name: 'zendesk_kg', command: 'dupe' }, // duplicate name dropped
-        ] as never,
-      },
-    });
-    const tools = getGuestCommandTools(c);
+    const tools = normalizeCommandTools([
+      { name: 'zendesk_kg', command: 'zendesk-kg', allowedSubcommands: ['search', 'stats'] },
+      { name: 'bad name', command: 'x' }, // invalid name (space)
+      { name: 'noCmd', command: '   ' }, // empty command
+      { name: 'zendesk_kg', command: 'dupe' }, // duplicate name dropped
+    ] as never);
     expect(tools).toHaveLength(1);
     expect(tools[0]?.name).toBe('zendesk_kg');
     expect(tools[0]?.command).toBe('zendesk-kg');
@@ -95,36 +76,26 @@ describe('guest tool policy', () => {
   });
 
   it('clamps timeout and output bounds', () => {
-    const c = cfg({
-      guestPolicy: {
-        commandTools: [
-          { name: 't', command: 'x', timeoutMs: 999_999_999, maxOutputBytes: 1 },
-        ],
-      },
-    });
-    const t = getGuestCommandTools(c)[0];
-    expect(t?.timeoutMs).toBe(600_000);
-    expect(t?.maxOutputBytes).toBe(1000);
+    const tools = normalizeCommandTools([
+      { name: 't', command: 'x', timeoutMs: 999_999_999, maxOutputBytes: 1 },
+    ]);
+    expect(tools[0]?.timeoutMs).toBe(600_000);
+    expect(tools[0]?.maxOutputBytes).toBe(1000);
   });
+});
 
-  it('builds the hook allowlist from command-tool names plus extras, deduped', () => {
-    const c = cfg({
-      guestPolicy: {
-        commandTools: [{ name: 'zendesk_kg', command: 'zendesk-kg' }],
-        extraToolAllowlist: ['read', 'zendesk_kg'],
-      },
-    });
-    expect(getGuestToolAllowlist(c).sort()).toEqual(['read', 'zendesk_kg']);
+describe('assertNoLegacyPolicyFields', () => {
+  it('rejects preferences.guestPolicy', () => {
+    expect(() =>
+      assertNoLegacyPolicyFields({ preferences: { guestPolicy: {} } } as never),
+    ).toThrow(/guestPolicy/);
   });
-
-  it('defaults feishu host tools off for guests', () => {
-    expect(getGuestFeishuHostTools(cfg({ guestPolicy: {} }))).toBe(false);
-    expect(getGuestFeishuHostTools(cfg({ guestPolicy: { feishuHostTools: true } }))).toBe(true);
+  it('rejects relay.route', () => {
+    expect(() =>
+      assertNoLegacyPolicyFields({ relay: { role: 'front', route: { users: [] } } } as never),
+    ).toThrow(/relay\.route/);
   });
-
-  it('resolves the guest system prompt, treating blank as unset', () => {
-    expect(getGuestSystemPrompt(cfg({ guestPolicy: {} }))).toBeUndefined();
-    expect(getGuestSystemPrompt(cfg({ guestPolicy: { systemPrompt: '   ' } }))).toBeUndefined();
-    expect(getGuestSystemPrompt(cfg({ guestPolicy: { systemPrompt: '你可以用 zendesk-kg' } }))).toBe('你可以用 zendesk-kg');
+  it('passes a clean config', () => {
+    expect(() => assertNoLegacyPolicyFields({})).not.toThrow();
   });
 });

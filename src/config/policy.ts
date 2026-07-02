@@ -3,12 +3,9 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { log } from '../core/logger';
 import { paths } from './paths';
 import {
-  getGuestPolicy,
   normalizeCommandTools,
-  relayTrustedUsers,
   type AppConfig,
   type CommandToolConfig,
-  type GuestToolPolicy,
   type PolicyConfig,
   type PolicyRule,
   type PolicyRunTarget,
@@ -25,11 +22,10 @@ import {
  * (`ResolvedProfile`) it runs under and where it runs (`PolicyRunTarget`).
  *
  * `effectivePolicy(cfg)` is the single entry: it returns the explicit
- * `cfg.policy` when set, else SYNTHESIZES one from the legacy
- * `preferences.access` / `preferences.guestPolicy` / `relay.route` fields so
- * existing deployments behave exactly as before. Everything downstream
- * (channel.ts, route.ts) consumes the resolved result, never the raw legacy
- * fields, so there is exactly one place that understands the matrix.
+ * `cfg.policy` when set, else falls back to a built-in open default (everyone
+ * runs `full`, nothing relays). Everything downstream (channel.ts, route.ts)
+ * consumes the resolved result, never raw legacy fields, so there is exactly
+ * one place that understands the matrix.
  */
 
 /** Reserved principal name for any sender not in a named principal. */
@@ -61,7 +57,7 @@ export interface ResolvedProfile {
 
 export interface PolicyContext {
   senderId?: string;
-  /** Scenario; undefined when unknown (e.g. card/comment routing). */
+  /** Scenario; undefined when unknown (e.g. an event with no chat scenario). */
   chat?: PolicyScenario;
   chatId?: string;
 }
@@ -129,8 +125,8 @@ function normalizeScenarios(v: unknown): PolicyScenario[] | undefined {
 }
 
 /** True when `scenario` is covered by an `allowed` relay-scenario list. A
- * `group` allowance also covers `topic`. An unknown scenario (e.g. a doc
- * comment) never satisfies an explicit restriction. */
+ * `group` allowance also covers `topic`. An unknown scenario (e.g. an event
+ * with no chat scenario) never satisfies an explicit restriction. */
 function scenarioMatches(allowed: PolicyScenario[], scenario: PolicyScenario | undefined): boolean {
   if (!scenario) return false;
   if (allowed.includes(scenario)) return true;
@@ -257,8 +253,8 @@ export function resolvePolicy(cfg: AppConfig, ctx: PolicyContext): ResolvedPolic
  * Where a sender's runs execute (front/worker). Consulted by the relay router.
  * `scenario` (the chat type of the triggering event) gates per-principal
  * `relayScenarios`: a worker-bound principal only relays the scenarios it lists
- * (default: all). An unknown scenario (e.g. a doc comment) never satisfies an
- * explicit restriction, so it stays on the front.
+ * (default: all). An unknown scenario (e.g. an event with no chat scenario)
+ * never satisfies an explicit restriction, so it stays on the front.
  */
 export function relayRunTarget(
   cfg: AppConfig,
@@ -339,79 +335,28 @@ export function injectionDecision(
   return profile.name === activeProfileName ? 'inject' : 'defer';
 }
 
-/** The explicit policy when set, else one synthesized from legacy fields. */
+/** Policy when none is configured: everyone runs `full`, nothing relays. */
+const DEFAULT_OPEN_POLICY: PolicyConfig = {
+  principals: {},
+  profiles: {},
+  rules: [{ profile: 'full' }],
+};
+
+/** The explicit policy when set, else the built-in open default. */
 export function effectivePolicy(cfg: AppConfig): PolicyConfig {
-  return cfg.policy ?? synthesizeLegacyPolicy(cfg);
-}
-
-/** Legacy unrestricted (full-tools) set: `guestPolicy.unrestrictedUsers ?? access.admins`. */
-function unrestrictedSet(cfg: AppConfig): string[] {
-  const gp = getGuestPolicy(cfg);
-  return cleanList(gp?.unrestrictedUsers ?? cfg.preferences?.access?.admins);
-}
-
-/** Build a restricted profile from the legacy `guestPolicy`. */
-function guestProfileFromLegacy(gp: GuestToolPolicy): ProfileConfig {
-  return {
-    // Legacy guest allowlist = command-tool names + `extraToolAllowlist`. The
-    // command-tool names come from `commandTools`; `extraToolAllowlist` are the
-    // extra built-ins, which is exactly `ProfileConfig.tools`.
-    tools: cleanList(gp.extraToolAllowlist),
-    commandTools: gp.commandTools,
-    feishuHostTools: gp.feishuHostTools === true,
-    maxToolCalls: gp.maxToolCalls,
-    systemPrompt: gp.systemPrompt,
-    discovery: 'off',
-    memory: 'off',
-  };
+  return cfg.policy ?? DEFAULT_OPEN_POLICY;
 }
 
 /**
- * Reproduce the legacy access/guest/relay matrix as an explicit `PolicyConfig`:
- *
- *   - No `guestPolicy`  -> everyone runs `full`; relay-trusted senders route to
- *     a worker (a single `relay` principal carries `run: 'worker'`).
- *   - With `guestPolicy` -> the full-tools set runs `full` in p2p only; every
- *     other case (groups/topics, non-trusted p2p) runs the `guest` sandbox.
- *     Run targets split faithfully so `relay.route.users` keeps winning routing
- *     even for senders who are still sandboxed on the worker.
+ * True when at least one principal in `policy.principals` is worker-routed
+ * (`run: 'worker'`). A `relay.role: 'front'` with no worker-routed principal
+ * relays nobody — there used to be a fallback (`guestPolicy.unrestrictedUsers`
+ * → `access.admins`) that auto-relayed trusted users in that case; it was
+ * removed with the unified policy model, so this is now silent by design and
+ * callers should warn instead of assuming a relay target exists.
  */
-export function synthesizeLegacyPolicy(cfg: AppConfig): PolicyConfig {
-  const gp = getGuestPolicy(cfg);
-  // Relay routing set — only meaningful when relay is configured.
-  const relaySet = cfg.relay ? cleanList(relayTrustedUsers(cfg)) : [];
-
-  if (!gp) {
-    const principals: Record<string, PrincipalInput> = {};
-    if (relaySet.length > 0) principals.relay = { users: relaySet, run: 'worker' };
-    return { principals, profiles: {}, rules: [{ profile: 'full' }] };
-  }
-
-  const fullSet = unrestrictedSet(cfg);
-  const inRelay = (u: string): boolean => relaySet.includes(u);
-  const fullWorker = fullSet.filter(inRelay);
-  const fullFront = fullSet.filter((u) => !inRelay(u));
-  const relayOnly = relaySet.filter((u) => !fullSet.includes(u));
-
-  const principals: Record<string, PrincipalInput> = {};
-  const fullPrincipals: string[] = [];
-  if (fullWorker.length > 0) {
-    principals.full_worker = { users: fullWorker, run: 'worker' };
-    fullPrincipals.push('full_worker');
-  }
-  if (fullFront.length > 0) {
-    principals.full_front = { users: fullFront, run: 'front' };
-    fullPrincipals.push('full_front');
-  }
-  if (relayOnly.length > 0) {
-    principals.relay_only = { users: relayOnly, run: 'worker' };
-  }
-
-  const rules: PolicyRule[] = [];
-  if (fullPrincipals.length > 0) {
-    rules.push({ when: { chat: 'p2p', principal: fullPrincipals }, profile: 'full' });
-  }
-  rules.push({ profile: 'guest' });
-
-  return { principals, profiles: { guest: guestProfileFromLegacy(gp) }, rules };
+export function hasWorkerPrincipal(policy: PolicyConfig): boolean {
+  return Object.values(policy.principals ?? {}).some(
+    (raw) => normalizePrincipal(raw).run === 'worker',
+  );
 }

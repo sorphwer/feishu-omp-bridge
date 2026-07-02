@@ -1,12 +1,12 @@
 # 08 · 配置与密钥
 
-> 源码基线：commit `78460f6`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `103dd04`（文档对应的源码 commit；详见 [README](./README.md)）。
 
-> 覆盖范围：`config/schema.ts` 的完整 `AppConfig` 层级（含每个 preference 字段、默认值、clamp）与所有访问器；`config/store.ts`（原子写、加密账户配置、secrets-getter 包装脚本）；`config/paths.ts`（全部路径 + `legacyPaths`）；`config/secret-resolver.ts`（plain→template→env→file→exec 五段管线、self-bridge 短路、provider 级联）；`config/keystore.ts`（AES-256-GCM、PBKDF2-SHA256 10 万次、host 派生种子 + 盐文件、`secrets.enc` 形状）。
+> 覆盖范围：`config/schema.ts` 的完整 `AppConfig` 层级（含每个 preference 字段、默认值、clamp）与所有访问器；`config/store.ts`（原子写、加密账户配置、secrets-getter 包装脚本）；`config/paths.ts`（全部路径）；`config/secret-resolver.ts`（plain→template→env→file→exec 五段管线、self-bridge 短路、provider 级联）；`config/keystore.ts`（AES-256-GCM、PBKDF2-SHA256 10 万次、host 派生种子 + 盐文件、`secrets.enc` 形状）。
 >
 > 源文件：`src/config/schema.ts`、`src/config/store.ts`、`src/config/paths.ts`、`src/config/secret-resolver.ts`、`src/config/keystore.ts`、`README.md`（安全说明）。
 
-相关篇：[总览与架构](./01-overview-and-architecture.md)（数据目录、启动迁移）、[访问控制与访客沙箱](./09-access-and-guest-sandbox.md)、[聊天命令](./10-commands.md)（`/config`/`/account`）、[守护进程与 CLI 运行时](./11-daemon-cli-runtime.md)（`secrets` 子命令）。
+相关篇：[总览与架构](./01-overview-and-architecture.md)（数据目录、启动迁移）、[访问控制与访客沙箱](./09-access-and-guest-sandbox.md)、[聊天命令](./10-commands.md)（`/config`）、[守护进程与 CLI 运行时](./11-daemon-cli-runtime.md)（`secrets` 子命令）。
 
 ## 1. `AppConfig` 层级（`config/schema.ts`）
 
@@ -18,6 +18,27 @@ interface AppConfig {
   relay?: RelayConfig;
   policy?: PolicyConfig;   // 统一 principals/profiles/rules（见 §1.3 与 [09]）
 }
+```
+
+顶层字段分组一图流（含本次新增的 `policy.principals.*.relayScenarios`）：
+
+```mermaid
+flowchart LR
+  CFG["AppConfig"] --> ACC["accounts.app: AppCredentials"]
+  ACC --> ACCF["id · secret: SecretInput · tenant: feishu/lark"]
+  CFG --> SEC["secrets?: SecretsConfig"]
+  SEC --> SECF["providers: Record&lt;name, ProviderConfig&gt;<br/>defaults: env / file / exec 各自的默认 provider 名"]
+  CFG --> PREF["preferences?: AppPreferences"]
+  PREF --> PREF1["后端参数：ompBinary / ompModel / ompThinking<br/>ompSessionDir / ompTools"]
+  PREF --> PREF2["行为旋钮：messageReply / showToolCalls<br/>maxConcurrentRuns / runIdleTimeoutMinutes<br/>requireMentionInGroup / agentStopGraceMs"]
+  PREF --> PREF3["粗门控：access: AppAccess<br/>（独立于 policy，始终生效，见 09）"]
+  CFG --> REL["relay?: RelayConfig"]
+  REL --> RELF["role: front/worker · listen · endpoint<br/>workerId · secret?: SecretInput"]
+  CFG --> POL["policy?: PolicyConfig"]
+  POL --> PRIN["principals: Record&lt;name, string[] 或 PrincipalConfig&gt;"]
+  PRIN --> PRINF["users: string[] · run?: front/worker<br/>relayScenarios?: PolicyScenario[]（本次新增，见 §1.3）"]
+  POL --> PROF["profiles: Record&lt;name, ProfileConfig&gt;<br/>内置 full / locked 恒存在"]
+  POL --> RULES["rules: PolicyRule[]（first-match）"]
 ```
 
 - `AppCredentials { id; secret: SecretInput; tenant: 'feishu'|'lark' }`。
@@ -35,17 +56,15 @@ interface AppConfig {
 | `ompThinking` | 未设 | `--thinking` | `getOmpThinking` |
 | `ompSessionDir` | `~/.feishu-omp-bridge/omp-sessions` | bridge 专用 session 目录 | `getOmpSessionDir` |
 | `ompTools` | 未设 | `--tools` 逗号白名单（全局，对所有人） | `getOmpTools` |
-| `codexBinary` | 未设 | 旧 Codex 可执行名，仅 `ompBinary` 缺失时用（遗留） | （`getOmpBinary` 回落） |
-| `codexModel` | 未设 | 旧 Codex 模型，仅 `ompModel` 缺失时用（遗留） | （`getOmpModel` 回落） |
-| `messageReply` | `markdown` | `card`/`markdown`/`text`；未设回落 `markdown`；旧值 `text` 在 `messageReplyMigrated` 置位前 coerce 为 `markdown` | `getMessageReplyMode` |
-| `messageReplyMigrated` | — | 内部迁移标记（0.1.27 重命名语义） | — |
+| `messageReply` | `markdown` | `card`/`markdown`；未设回落 `markdown` | `getMessageReplyMode` |
 | `showToolCalls` | `true` | `!== false`；关则隐藏工具调用块 | `getShowToolCalls` |
-| `maxConcurrentRuns` | `10` | clamp `[1,50]` | `getMaxConcurrentRuns` |
-| `runIdleTimeoutMinutes` | 关闭 | 全局 idle kill 分钟；0/未设 = 关 | `getRunIdleTimeoutMs`（×60000） |
+| `maxConcurrentRuns` | `10` | 非数字/`<1` 回落 `10`；上限 `50`（`Math.min(floor, 50)`） | `getMaxConcurrentRuns` |
+| `runIdleTimeoutMinutes` | 关闭 | 全局 idle kill 分钟；`<=0`/非数字/未设 = 关；设了则 clamp `[1,120]` 分钟 | `getRunIdleTimeoutMs`（×60000） |
 | `requireMentionInGroup` | `true` | `!== false`；群是否必须 @bot | `getRequireMentionInGroup` |
 | `access` | — | 见 [09](./09-access-and-guest-sandbox.md) | `isUserAllowed`/`isChatAllowed`/`isAdmin` |
-| `guestPolicy` | — | 见 [09](./09-access-and-guest-sandbox.md) | `getGuestPolicy` 等 |
-| `agentStopGraceMs` | `5000` | 范围 `[100,30000]`，越界回落默认 | `getAgentStopGraceMs` |
+| `agentStopGraceMs` | `5000` | 非数字回落 `5000`；数字 clamp 到 `[100,30000]`（注意：接口注释写"越界回落默认"，实现是 clamp——以代码为准） | `getAgentStopGraceMs` |
+
+> `codexBinary`/`codexModel`（旧 Codex 可执行名/模型别名）与 `messageReplyMigrated`（`text`→`markdown` 迁移标记）、`preferences.guestPolicy` 均已从 `AppPreferences` 接口里删除——不是"未使用"，是**字段本身不存在了**。`ompBinary`/`ompModel` 缺失时不再有任何回落；`messageReply` 只接受 `card`/`markdown` 两个值。
 
 `getMessageReplyMode` 未设时回落 `markdown`（与 README 偏好表一致）。注意：`messageReply` 字段的接口注释写 `Default 'card'`，但访问器实际回落 `markdown`——以访问器为准。
 
@@ -56,48 +75,59 @@ interface RelayConfig {
   role: 'front'|'worker';
   listen?: string;     // front 绑定，默认 127.0.0.1:8787
   endpoint?: string;   // worker 必填：front base URL
-  route?: { users?: string[] };  // front 转发哪些 open_id
   workerId?: string;   // 默认 hostname
+  secret?: SecretInput;  // 可选 relay-auth 密钥，两端必须一致（都设或都不设）
 }
 ```
 
-访问器：`getRelayConfig`、`relayTrustedUsers`（显式 `route.users` → 回落非空 `guestPolicy.unrestrictedUsers` → 回落非空 `access.admins`；都空 = 不转发任何人，fail-safe）、`isRelayTrusted(cfg, senderId)`（遗留；新路由用 `policy.ts` 的 `relayRunTarget`，见 [09](./09-access-and-guest-sandbox.md)）。认证用从 App Secret 派生的 HMAC，无需额外密钥。
+访问器：`getRelayConfig` 是唯一还在的读取器——旧的 `route: { users?: string[] }` 字段、`relayTrustedUsers`、`isRelayTrusted` 回落链访问器都已删除。**路由现在唯一走 `policy.ts` 的 `relayRunTarget(cfg, senderId, scenario?)`**：按 `principals[*].run`（`'front'`/`'worker'`）决定该人是否中继，再过 per-principal `relayScenarios` 场景门控（见 §1.3 与 [09](./09-access-and-guest-sandbox.md)），没有中间的信任名单回落链。认证用 HMAC：默认从 App Secret 派生密钥，零配置；设了 `relay.secret` 则两端改从它派生（`secret-resolver.ts` 的 `resolveRelaySecret`，见 §2）——可独立于飞书凭据轮换/吊销 relay 访问权。
 
 ### 1.3 `PolicyConfig`（统一访问策略，见 [09](./09-access-and-guest-sandbox.md)）
 
 ```ts
 interface PolicyConfig {
-  principals?: Record<string, string[] | { users: string[]; run?: 'front'|'worker' }>;
+  principals?: Record<string, string[] | PrincipalConfig>;
   profiles?: Record<string, ProfileConfig>;   // 命名工具模式；内置 full / locked 恒存在
   rules?: { when?: { chat?; principal?; chatId? }; profile: string }[];  // first-match
 }
+
+interface PrincipalConfig {
+  users: string[];
+  run?: 'front' | 'worker';           // 默认 front
+  relayScenarios?: PolicyScenario[];  // 本次新增：run==='worker' 时限制哪些场景 relay
+}
+// PolicyScenario = 'p2p' | 'group' | 'topic'；string[] 简写 coerce 为 { users, run: 'front' }
 ```
 
 - **正交三轴**：`principals`=谁（命名 open_id 组；未列入者即隐式 `guest`，且 `run` 恒 `front`）、`profiles`=放什么工具（`tools:'all'`=全开不沙箱；`tools:string[]`=受限沙箱）、`rules`=何时（`chat`(p2p/group/topic，`group` 亦匹配 `topic`) × `principal` × `chatId` 首条命中）。`run`(front/worker) 是 **principal 级**属性（非 per-rule），保证某人交互卡片回调落在渲染它的同一端。
-- **缺省 = 向后兼容**：未设 `policy` 时，`policy.ts` 的 `synthesizeLegacyPolicy` 用旧 `access`/`guestPolicy`/`relay.route` 合成等价策略；行为与改造前完全一致。
+- **`relayScenarios`（本次新增）**：仅 `run === 'worker'` 时生效（`run:'front'` 忽略——`relayRunTarget` 先查 run，非 worker 直接返回 `'front'`），限制该 principal 的**哪些聊天场景** relay 到 worker，缺省 = 全部。例如 `['p2p']` = 只有私聊去 worker（个人笔记本），群/话题留在常驻 front。语义细节（`config/policy.ts`）：
+  - `normalizeScenarios` 过滤非法项并去重；**显式数组过滤到空仍是 `[]`**（什么都不 relay），与字段缺省（全部 relay）语义不同。
+  - `scenarioMatches`：`'group'` 允许项**亦覆盖 `'topic'`**（与 rule 的 `chat` 匹配同规则）；**未知场景**（`scenario === undefined`）在有显式限制时**永不满足** → 留在 front。`PolicyContext.chat`/`scenario` 参数类型仍允许 `undefined`（防御性设计），但云文档评论管线已整体删除后，当前代码路径（消息、卡片回调）在生产环境下都能解析出具体场景，理论上不会再触发这一分支。
+  - `relayRunTarget(cfg, senderId, scenario?)` 是唯一入口：`relay/route.ts` 的 `routeMessage`（由 `msg.chatType==='p2p'?'p2p':'group'` 推 scenario）、`routeCardAction`（经 `opts.resolveScenario?.(chatId)` 异步解 scenario）都过同一门控——卡片回调与渲染它的消息落在同一侧。`RelayKind` 现在只有 `'message'|'cardAction'` 两种（云文档评论的 `'comment'` kind 已删除）。
+- **缺省 = 内置开放默认**：未设 `policy` 时，`policy.ts` 的 `effectivePolicy` 回落到内置 `DEFAULT_OPEN_POLICY`（人人 `full`、不中继），不再有旧的 `synthesizeLegacyPolicy` 合成器。配置里若仍出现 `preferences.guestPolicy` 或 `relay.route`，`assertNoLegacyPolicyFields` 会在启动 / `controls.restart()` 时直接抛错拒绝（fail fast，避免安全字段被静默丢弃、fail open）；迁移对照表见 [CONFIGURATION.zh.md §13](../CONFIGURATION.zh.md#13-legacy-字段已移除与迁移对照)。
 - **显式 = fail-closed**：设了 `policy` 后，未命中任何 rule 或 rule 指向未知 profile → 跑内置 `locked`（零工具），而非回落全集。
-- 解析器在 `config/policy.ts`，不在 `schema.ts`（`schema.ts` 只放接口 + 旧字段访问器）。`ProfileConfig`/`PolicyRule` 等接口仍定义在 `schema.ts`。
+- 解析器在 `config/policy.ts`，不在 `schema.ts`（`schema.ts` 只放接口 + 旧字段访问器）。`ProfileConfig`/`PolicyRule`/`PrincipalConfig` 等接口仍定义在 `schema.ts`。运行时入口：`resolvePolicy`/`resolveBatchProfile`（工具面）、`relayRunTarget`（前述场景门控）、`injectionDecision`（mid-run 注入按 profile 同名门控，见 [04](./04-message-pipeline.md)/[09](./09-access-and-guest-sandbox.md)）。
 
 ## 2. secret 解析五段管线（`config/secret-resolver.ts`）
 
-`resolveAppSecret(cfg)` → `resolveSecretInput(secret, cfg.secrets, appId)`：
+`resolveAppSecret(cfg)` → `resolveSecretInput(secret, cfg.secrets, appId)`。同文件还有 `resolveRelaySecret(cfg, appSecret)`：relay HMAC 密钥种子——设了 `relay.secret` 就把它送进**同一条** `resolveSecretInput` 管线（所以 relay 密钥同样支持 plain / `${ENV}` / keystore ref），否则直接回落 App Secret（零配置默认）。
 
 ```mermaid
 flowchart TD
-  IN["resolveSecretInput(secret)"] --> STR{"是字符串?"}
-  STR -->|是| TPL{"匹配 ${VAR}?"}
-  TPL -->|是| ENV1["process.env[VAR]"]
+  IN["resolveSecretInput(secret, cfg.secrets, appId)"] --> STR{"是字符串?"}
+  STR -->|是| TPL{"匹配 ${VAR} 模板?"}
+  TPL -->|是| ENV1["process.env[VAR]<br/>未设则抛错"]
   TPL -->|否| PLAIN["原样返回"]
-  STR -->|"否 (SecretRef)"| SRC{"source?"}
-  SRC -->|env| E["resolveEnvRef<br/>(allowlist 校验)"]
-  SRC -->|file| F["resolveFileRef (读文件 trim)"]
-  SRC -->|exec| X{"command 是本 bridge<br/>secrets-getter?"}
-  X -->|是| SELF["self-bridge 短路<br/>直读 keystore getSecret"]
-  X -->|否| SPAWN["spawnExecProvider<br/>(stdin JSON → stdout values)"]
+  STR -->|"否 (SecretRef)"| LOOK["lookupProvider：<br/>ref.provider ?? defaults[source] ?? 'default'"]
+  LOOK --> SRC{"source?"}
+  SRC -->|env| E["resolveEnvRef<br/>(provider.allowlist 非空则校验 ref.id)"]
+  SRC -->|file| F["resolveFileRef<br/>(provider.path ? join(path,id) : id，读文件 trim)"]
+  SRC -->|exec| X{"isSelfBridgeCommand?<br/>command === secrets-getter 路径<br/>或 args 以 ['secrets','get'] 结尾"}
+  X -->|是| SELF["self-bridge 短路：直读 keystore<br/>getSecret(ref.id) → 回落 getSecret('app-'+appId)<br/>都没有则抛错"]
+  X -->|否| SPAWN["spawnExecProvider<br/>stdin {protocolVersion:1, provider, ids:[id]}<br/>stdout {values, errors} 取 values[id]"]
 ```
 
-
-1. **plain / template**（`SecretInput` 是字符串）：`resolvePlainOrTemplate`——若匹配 `ENV_TEMPLATE_RE=^${VAR}$` 则读 `process.env[VAR]`，否则原样返回。
+1. **plain / template**（`SecretInput` 是字符串）：`resolvePlainOrTemplate`——若匹配 `ENV_TEMPLATE_RE`（整串 `${VAR}`，变量名须 `[A-Z][A-Z0-9_]{0,127}`，大写开头）则读 `process.env[VAR]`（未设抛错），否则原样返回。
 2. **env**（`SecretRef.source==='env'`）：`resolveEnvRef`——若 provider 有非空 `allowlist` 且 `ref.id` 不在其中则拒；读 `process.env[ref.id]`。
 3. **file**：`resolveFileRef`——`provider.path ? join(path, id) : id` 读文件 trim。
 4. **exec**：`resolveExecRef`——**self-bridge 短路**：若 `command` 是本 bridge 的 `secrets-getter` 脚本（或 args 以 `['secrets','get']` 结尾，遗留/手写形态），直接读 keystore（`getSecret(ref.id)`，回落 `secretKeyForApp(appId)`）；否则 `spawnExecProvider`。
@@ -109,19 +139,20 @@ provider 级联：`lookupProvider` 按 `ref.provider ?? secrets.defaults?.[sourc
 
 本地 AES-256-GCM keystore，存 `paths.secretsFile`（`secrets.enc`）。常量：`KEY_LEN=32`、`IV_LEN=12`、`TAG_LEN=16`、`PBKDF2_ITER=100000`、`FILE_VERSION=1`。
 
-- `StoreFile { version; entries: Record<id, Envelope> }`；`Envelope { iv; tag; data; ... }`（base64）。
-- `loadOrCreateSalt()`：盐存 `paths.keystoreSaltFile`（`.keystore.salt`），缺则生成。盐**非密钥**——它只保证同机不同用户派生不同 key。
-- `deriveKey()`：`pbkdf2Sync(seed, salt, 100000, 32, 'sha256')`，seed 由 host 信息派生。
-- `encrypt`/`decrypt`（GCM + auth tag）。
-- 公开：`getSecret(id)`、`setSecret(id, plaintext)`、`removeSecret(id)`、`listSecretIds()`（不泄露 secret）。
+- `StoreFile { version; entries: Record<id, Envelope> }`；`Envelope { iv; data; tag }`（均 base64；version 不符或缺 entries → 按空 store 处理）。
+- 写盘走 `writeStore`：同目录 `*.tmp-<pid>` 临时文件 + `chmod 0600` + `rename`（与 `store.ts` 同款原子写）。
+- `loadOrCreateSalt()`：32 字节盐存 `paths.keystoreSaltFile`（`.keystore.salt`），缺则生成（同样原子写 + 0600）。盐**非密钥**——它只保证同机不同用户派生不同 key。
+- `deriveKey()`：`pbkdf2Sync(seed, salt, 100000, 32, 'sha256')`，seed = `` `${hostname()}|${userInfo().username}` ``。
+- `encrypt`/`decrypt`（GCM + auth tag；`decrypt` 校验 IV/tag 长度）。
+- 公开：`getSecret(id)`（无此 id 返回 `undefined`，解密失败则抛错）、`setSecret(id, plaintext)`、`removeSecret(id)`、`listSecretIds()`（不泄露 secret）。
 
 ## 4. `config/store.ts`
 
 - 配置文件支持 **JSON 或 YAML**：`resolveConfigPath(explicit?)` 选用——显式非默认路径（`--config foo.yaml`、测试临时文件）原样用；否则按 `config.json` → `config.yaml` → `config.yml` 取首个存在者，都不存在则回落 `config.json`（首次写入的默认）。`runStart` 启动时解析一次并贯穿 load/save/registry/controls。
 - `loadConfig(path?)`：`resolveConfigPath` 后按扩展名解析（`.yaml`/`.yml` 走 `yaml.parse`，否则 `JSON.parse`），ENOENT/空文件返回 `{}`。
-- `saveConfig(cfg, path?)`：**原子写**——写同目录临时文件（0600 权限）再 `rename`，避免半写窗口与宽权限明文残留；按解析出的文件扩展名序列化（YAML 写回会丢手写注释——`/config`、`/account` 等程序化改动会整篇重序列化）。
-- `buildEncryptedAccountConfig(appId, tenant, preferences?)`：把 app secret 指向加密 keystore 的 exec-provider SecretRef，保留既有 `preferences`。用于 `/account` 改凭据与首启迁移。
-- `ensureSecretsGetterWrapper()`：写 `~/.feishu-omp-bridge/secrets-getter` 薄包装脚本（用户所有、非符号链接），内部 `exec` 真正的 `node + bridge secrets get`——满足 lark-cli 的 `AssertSecurePath` 审计（不管 node 如何安装）。bridge 自身在 resolver 里见到这个 wrapper 路径就短路直读 keystore（见 §2）。
+- `saveConfig(cfg, path?)`：**原子写**——写同目录临时文件（0600 权限）再 `rename`，避免半写窗口与宽权限明文残留；按解析出的文件扩展名序列化（YAML 写回会丢手写注释——`/config` 等程序化改动会整篇重序列化）。
+- `buildEncryptedAccountConfig(appId, tenant, prior?)`：先 `...prior` 展开既有配置（`preferences`、`relay`、`policy` 等**所有**非凭据顶层节原样保留），再重建 `accounts`（app secret 指向加密 keystore 的 exec-provider SecretRef，provider 名 `bridge`，id 为 `secretKeyForApp(appId)`）与 `secrets`（`providers.bridge = { source:'exec', command: wrapper 路径, args: [] }`）——`prior` 里的明文 secret 或旧 provider 被覆盖而非保留。换凭据不再有聊天内命令（`/account` 已删除），现只经 CLI：首启注册向导，或 `secrets set` + `service restart`；同一函数也用于首启的明文 secret 迁移。
+- `ensureSecretsGetterWrapper()`：写 `~/.feishu-omp-bridge/secrets-getter` 薄包装脚本（用户所有、非符号链接、`0700`，同款原子写），内部 `exec` 真正的 `node + bridge secrets get`（node 路径与 bridge 入口从 `process.execPath`/`process.argv[1]` 取，单引号 shell 转义）——满足 lark-cli 的 `AssertSecurePath` 审计（不管 node 如何安装）。**每次调用都重写**：node 路径可能在两次运行间移动（nvm 切版本、重装）。bridge 自身在 resolver 里见到这个 wrapper 路径就短路直读 keystore（见 §2）。
 
 ```mermaid
 flowchart LR
@@ -142,8 +173,8 @@ flowchart LR
 - 不要提交 `config.json`、`secrets.enc`、日志、session 文件。
 - App Secret 默认迁进加密 keystore，`config.json` 只存 SecretRef。
 - keystore 防的是备份/误提交/日志泄漏中的明文暴露，**不是**同用户进程级强隔离。
-- OMP 能跑本机工具 ≈ 把飞书消息授权给本地 Agent；生产建议配 `access.allowedUsers/allowedChats/admins`、`ompTools` 全局白名单、`guestPolicy` 访客沙箱、固定 cwd。群默认必须 @bot，`@全员` 不触发。
+- OMP 能跑本机工具 ≈ 把飞书消息授权给本地 Agent；生产建议配 `access.allowedUsers/allowedChats/admins`、`ompTools` 全局白名单、一个受限的 `policy` profile（见 [09](./09-access-and-guest-sandbox.md)）、固定 cwd。群默认必须 @bot，`@全员` 不触发。
 
 ## 6. 是否后端通用
 
-`store.ts`/`keystore.ts`/`paths.ts`/`secret-resolver.ts` 与 agent 后端无关，可整体复用——`dify-feishu-bridge` 仅改 `paths.ts` 的数据根、把 `schema.ts` 的 `omp*`/`codex*` 换成 `dify` 块、并把 `secret-resolver.ts` 从“解析 app secret”泛化为“解析任意 `SecretInput`”以便 `dify.apiKey` 复用同一管线（见 [dify 配置](../dify-feishu-bridge-design/04-config-session-and-guest.md)）。
+`store.ts`/`keystore.ts`/`paths.ts`/`secret-resolver.ts` 与 agent 后端无关，可整体复用——`dify-feishu-bridge` 仅改 `paths.ts` 的数据根、把 `schema.ts` 的 `omp*` 字段块换成 `dify` 块、并把 `secret-resolver.ts` 从“解析 app secret”泛化为“解析任意 `SecretInput`”以便 `dify.apiKey` 复用同一管线（见 [dify 配置](../dify-feishu-bridge-design/04-config-session-and-guest.md)）。

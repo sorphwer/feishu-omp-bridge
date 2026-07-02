@@ -33,30 +33,16 @@ export function configFormCard(opts: ConfigFormOpts): object {
           tag: 'form',
           name: 'config_form',
           elements: [
+            // `message_reply` picker removed: 'markdown' is the only reachable
+            // option now ('card' lives on only for configs that hand-wrote
+            // `messageReply: 'card'` in config.json — see getMessageReplyMode),
+            // so a select with a single choice was dead UI. submitConfig falls
+            // back to the CURRENT config value (not a hardcoded default) when
+            // this field is absent from form_value.
             {
               tag: 'markdown',
               content:
-                '**消息回复方式**\n' +
-                '_纯文本:agent 跑完一次性发出,不流式,体感最轻_\n' +
-                '_消息卡片:轻量流式 markdown 卡片,飞书原生打字机动画_',
-            },
-            {
-              tag: 'select_static',
-              name: 'message_reply',
-              // 'card' (交互卡片) is hidden from the picker for now; existing
-              // configs with `messageReply: 'card'` still work — showConfigForm
-              // displays them as 'markdown' in the form, but submitting only
-              // overwrites if the user actually picks something.
-              initial_option: opts.messageReply === 'card' ? 'markdown' : opts.messageReply,
-              options: [
-                { text: { tag: 'plain_text', content: '纯文本' }, value: 'text' },
-                { text: { tag: 'plain_text', content: '消息卡片(默认)' }, value: 'markdown' },
-              ],
-            },
-            {
-              tag: 'markdown',
-              content:
-                '\n**工具调用显示**\n' +
+                '**工具调用显示**\n' +
                 '_显示:可以看到 bot 跑了什么命令、读了哪些文件等过程_\n' +
                 '_隐藏:只看 agent 最终的文字答复,跳过所有工具块_',
             },
@@ -88,7 +74,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               content:
                 '\n**run 探活(分钟)**\n' +
                 '_agent 长时间没输出时自动 kill,防止假死_\n' +
-                '_0 = 关闭(默认),范围 1-120。可被 `/timeout` 在单个 scope 覆盖_',
+                '_0 = 关闭(默认),范围 1-120_',
             },
             {
               tag: 'input',
@@ -153,7 +139,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               tag: 'markdown',
               content:
                 '\n**管理员**(`admins`)\n' +
-                '_只允许这些 open_id 跑敏感命令: `/account` `/config` `/exit` `/reconnect` `/doctor` `/cd` `/ws` `/switch`_\n' +
+                '_只允许这些 open_id 跑敏感命令: `/config` `/exit` `/reconnect` `/doctor` `/cd` `/ws` `/switch`_\n' +
                 '_留空 = 不做管理员限制(所有放行的用户都能跑)。⚠️ 改为非空时务必把自己包含在内,否则会自锁出 /config_',
             },
             {
@@ -204,12 +190,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
 }
 
 export function configSavedCard(opts: ConfigFormOpts): object {
-  const replyLabel =
-    opts.messageReply === 'card'
-      ? '交互卡片'
-      : opts.messageReply === 'markdown'
-        ? '消息卡片'
-        : '纯文本';
+  const replyLabel = opts.messageReply === 'card' ? '交互卡片' : '消息卡片';
   const summarizeList = (raw: string): string => {
     const items = raw.split(',').map((s) => s.trim()).filter(Boolean);
     return items.length === 0 ? '_(不限制)_' : `${items.length} 项`;

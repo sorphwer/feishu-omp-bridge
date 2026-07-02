@@ -1,3 +1,4 @@
+import { log } from '../core/logger';
 import { paths } from './paths';
 
 export type TenantBrand = 'feishu' | 'lark';
@@ -63,12 +64,8 @@ export interface SecretsConfig {
  * How replies are rendered in IM chats:
  *   - `card`: full interactive card (tool panels, ⏹ button, footer status)
  *   - `markdown`: lightweight streaming markdown card (typewriter, no buttons)
- *   - `text`: plain markdown post sent once at run completion (no streaming)
- *
- * Pre-0.1.27 only had `card` and `text`, where `text` meant what's now called
- * `markdown`. See `messageReplyMigrated` for the auto-coercion logic.
  */
-export type MessageReplyMode = 'card' | 'markdown' | 'text';
+export type MessageReplyMode = 'card' | 'markdown';
 
 /**
  * Access control settings. All three lists default to "no restriction" when
@@ -121,36 +118,6 @@ export interface CommandToolConfig {
   maxCalls?: number;
 }
 
-/**
- * Sandboxes NON-trusted senders. When present, any sender NOT in
- * `unrestrictedUsers` runs OMP with a hard tool allowlist (a fail-closed
- * `tool_call` hook), discovery sources disabled, and only the declared
- * `commandTools` available — so a stranger DMing the bot can drive only the
- * whitelisted CLIs, never bash / eval / MCP / file tools. Trusted senders
- * (the operator) are completely unaffected and keep the full tool set.
- *
- * Absent = feature off: everyone gets the normal full tool set (back-compat).
- */
-export interface GuestToolPolicy {
-  /** Senders exempt from the sandbox (full tools). Falls back to `access.admins` when unset. */
-  unrestrictedUsers?: string[];
-  /** CLIs exposed to guests as host tools (their only execution surface). */
-  commandTools?: CommandToolConfig[];
-  /** Extra builtin tool names guests may also call (e.g. "read"). Default: none. */
-  extraToolAllowlist?: string[];
-  /** Expose the Feishu host tools (send/reply/get message) to guests. Default false. */
-  feishuHostTools?: boolean;
-  /** Total tool calls allowed per run (turn) across ALL tools. Unset/0 = no total cap. */
-  maxToolCalls?: number;
-  /**
-   * System-prompt text PREPENDED to the guest user prompt — gives the
-   * sandboxed agent its role/instructions without affecting trusted users.
-   * Empty/unset = none. (Prepended, not `--append-system-prompt`, which hung
-   * the codex request.)
-   */
-  systemPrompt?: string;
-}
-
 export interface AppPreferences {
   /** OMP executable name or path. Default: omp. */
   ompBinary?: string;
@@ -162,21 +129,8 @@ export interface AppPreferences {
   ompSessionDir?: string;
   /** Optional comma-separated OMP tool allowlist passed as `--tools`. */
   ompTools?: string;
-  /** Legacy Codex executable name or path. Used only when `ompBinary` is absent. */
-  codexBinary?: string;
-  /** Legacy Codex model. Used only when `ompModel` is absent. */
-  codexModel?: string;
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
-  /**
-   * Internal marker: pre-0.1.27 the value `'text'` meant "lightweight
-   * streaming markdown card" (what's now called `'markdown'`). On upgrade
-   * we'd silently switch those users to true plain-text behavior unless we
-   * coerce; this flag is set the first time the user submits `/config`
-   * after the rename, indicating their `messageReply` value is in the
-   * new semantic.
-   */
-  messageReplyMigrated?: boolean;
   /**
    * Whether to render tool-call blocks (Bash / Read / Edit / ...) in the
    * output. Default true. Turn off if you only care about OMP's final
@@ -193,7 +147,7 @@ export interface AppPreferences {
    * Global default idle-timeout for OMP runs, in minutes. When set,
    * if OMP emits no stream event for this long the bridge kills the
    * run as presumed-hung. Undefined / 0 = no timeout (the default — runs
-   * can hang indefinitely). Per-scope `/timeout` overrides this.
+   * can hang indefinitely).
    */
   runIdleTimeoutMinutes?: number;
   /**
@@ -203,13 +157,10 @@ export interface AppPreferences {
    * message reach OMP (the 0.1.21-and-earlier behavior).
    *
    * @全员 is never responded to regardless (SDK `respondToMentionAll: false`).
-   * Cloud-doc comments still require @-mention unconditionally.
    */
   requireMentionInGroup?: boolean;
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
-  /** Per-sender tool sandbox for non-trusted senders. See GuestToolPolicy. */
-  guestPolicy?: GuestToolPolicy;
   /**
    * Grace period (ms) between SIGTERM and SIGKILL when killing the OMP
    * subprocess. Bumped from a hardcoded 500ms because agents often have
@@ -245,13 +196,6 @@ export interface RelayConfig {
    * `https://your-server.example`. The ONE field a worker must set.
    */
   endpoint?: string;
-  /**
-   * `front`: which senders (open_id) are relayed to a worker. Falls back to a
-   * non-empty `guestPolicy.unrestrictedUsers`, then non-empty `access.admins`.
-   * Empty/unset everywhere = relay NOBODY (fail-safe — never relay strangers
-   * to your laptop). Untrusted senders stay on the front (guest sandbox).
-   */
-  route?: { users?: string[] };
   /** Stable id for this worker (shown in logs; multi-worker future). Default: hostname. */
   workerId?: string;
   /**
@@ -275,10 +219,8 @@ export interface RelayConfig {
  *   - WHEN   `rules`:      first-match (scenario × principal × chat) -> profile.
  *   - WHERE  per-principal `run`: front (local) or worker (relayed to a laptop).
  *
- * Absent `policy` = back-compat: a policy is synthesized from the legacy
- * `preferences.access` / `preferences.guestPolicy` / `relay.route` fields (see
- * `synthesizeLegacyPolicy` in policy.ts), so deployed configs keep working.
- * When `policy` IS present it is authoritative and fail-closed: a sender that
+ * Absent `policy` = built-in open defaults: everyone gets `full` profile, no
+ * relay. Explicit `policy` is authoritative and fail-closed: a sender that
  * matches no rule, or a rule naming an unknown profile, runs LOCKED (zero
  * tools) rather than falling open to the full tool set.
  */
@@ -307,8 +249,8 @@ export interface PrincipalConfig {
    * When `run === 'worker'`, restrict WHICH chat scenarios relay to the worker
    * (default: all). e.g. `['p2p']` sends only this principal's private chats to
    * the worker (a personal laptop) while their group/topic activity stays on the
-   * always-on front. A `'group'` entry also matches `'topic'`. Card actions and
-   * comments resolve through the same gate, so callbacks stay on the side that
+   * always-on front. A `'group'` entry also matches `'topic'`. Card actions
+   * resolve through the same gate, so callbacks stay on the side that
    * rendered the card. Ignored when `run` is `front`.
    */
   relayScenarios?: PolicyScenario[];
@@ -399,7 +341,7 @@ export interface AppConfig {
   secrets?: SecretsConfig;
   preferences?: AppPreferences;
   relay?: RelayConfig;
-  /** Unified principals/profiles/rules. Absent = synthesized from legacy fields. */
+  /** Unified principals/profiles/rules. Absent = built-in open default (everyone full, no relay). */
   policy?: PolicyConfig;
 }
 
@@ -425,24 +367,14 @@ export function secretKeyForApp(appId: string): string {
   return `app-${appId}`;
 }
 
-/**
- * Resolve the message-reply preference with default fallback + legacy coerce.
- *
- * Pre-0.1.27 users with `messageReply: 'text'` actually wanted the streaming
- * markdown card (the new `'markdown'`). Until they re-submit `/config`
- * (which sets `messageReplyMigrated: true`), we map their `text` →
- * `markdown` so the behavior stays the same after upgrade.
- *
- * Default for fresh configs (no `messageReply` set) is `'markdown'`.
- */
 export function getOmpBinary(cfg: AppConfig): string {
-  const raw = cfg.preferences?.ompBinary ?? cfg.preferences?.codexBinary;
+  const raw = cfg.preferences?.ompBinary;
   if (typeof raw !== 'string' || raw.trim() === '') return 'omp';
   return raw.trim();
 }
 
 export function getOmpModel(cfg: AppConfig): string | undefined {
-  const raw = cfg.preferences?.ompModel ?? cfg.preferences?.codexModel;
+  const raw = cfg.preferences?.ompModel;
   if (typeof raw !== 'string' || raw.trim() === '') return undefined;
   return raw.trim();
 }
@@ -465,12 +397,17 @@ export function getOmpTools(cfg: AppConfig): string | undefined {
   return raw.trim();
 }
 
+/**
+ * Resolve the message-reply preference with default fallback.
+ *
+ * Removed values (e.g. the pre-0.1.27 `'text'` mode) silently coerce to
+ * `'markdown'` rather than erroring, so stale configs keep working.
+ *
+ * Default for fresh configs (no `messageReply` set) is `'markdown'`.
+ */
 export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
   const raw = cfg.preferences?.messageReply;
-  if (raw === 'text' && cfg.preferences?.messageReplyMigrated !== true) {
-    return 'markdown';
-  }
-  if (raw === 'card' || raw === 'markdown' || raw === 'text') return raw;
+  if (raw === 'card' || raw === 'markdown') return raw;
   return 'markdown';
 }
 
@@ -544,57 +481,9 @@ export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   return clamped * 60_000;
 }
 
-/**
- * The guest sandbox policy, or undefined when the feature is off. When
- * present, senders not on the trusted list run OMP in a hard-allowlisted
- * sandbox (see GuestToolPolicy).
- */
-export function getGuestPolicy(cfg: AppConfig): GuestToolPolicy | undefined {
-  const p = cfg.preferences?.guestPolicy;
-  return p && typeof p === 'object' ? p : undefined;
-}
-
-/**
- * True when `senderId` is NOT sandboxed: either the feature is off, or the
- * sender is on the trusted exemption list. Trusted list falls back to
- * `access.admins` when `unrestrictedUsers` is unset. When a policy is present
- * but no trusted list resolves, nobody is exempt (fail-safe: lock rather than
- * silently exempt everyone). Equivalently, `!isUnrestrictedUser(...)` means
- * "apply the guest sandbox to this sender".
- */
-export function isUnrestrictedUser(cfg: AppConfig, senderId: string): boolean {
-  const policy = getGuestPolicy(cfg);
-  if (!policy) return true;
-  const list = policy.unrestrictedUsers ?? cfg.preferences?.access?.admins;
-  if (!list || list.length === 0) return false;
-  return list.includes(senderId);
-}
-
 /** The relay config, or undefined when relay is off (standalone bridge). */
 export function getRelayConfig(cfg: AppConfig): RelayConfig | undefined {
   return cfg.relay;
-}
-
-/**
- * The open_id set the front relays to a worker. Explicit `relay.route.users`
- * wins; otherwise falls back to a NON-EMPTY `unrestrictedUsers`, then NON-EMPTY
- * `admins`. Empty everywhere = relay nobody (fail-safe: an unset trust list
- * must never mean "relay everyone to the laptop").
- */
-export function relayTrustedUsers(cfg: AppConfig): string[] {
-  const route = cfg.relay?.route?.users?.filter(Boolean);
-  if (route && route.length > 0) return route;
-  const unrestricted = cfg.preferences?.guestPolicy?.unrestrictedUsers?.filter(Boolean);
-  if (unrestricted && unrestricted.length > 0) return unrestricted;
-  const admins = cfg.preferences?.access?.admins?.filter(Boolean);
-  if (admins && admins.length > 0) return admins;
-  return [];
-}
-
-/** True when `senderId` should be relayed to a worker (and is non-empty). */
-export function isRelayTrusted(cfg: AppConfig, senderId: string | undefined): boolean {
-  if (!senderId) return false;
-  return relayTrustedUsers(cfg).includes(senderId);
 }
 
 const TOOL_NAME_RE = /^[a-zA-Z0-9_]+$/;
@@ -613,8 +502,8 @@ function clampInt(v: unknown, def: number, lo: number, hi: number): number {
 /**
  * Validate + normalize a raw `commandTools` array: drops entries with an
  * invalid name (must match /^[a-zA-Z0-9_]+$/) or empty command, dedupes by
- * name, and fills timeout/output defaults. Shared by the legacy `guestPolicy`
- * accessor and the unified `ProfileConfig` resolver (policy.ts).
+ * name, and fills timeout/output defaults. Shared by every profile's
+ * `commandTools` resolution (policy.ts).
  */
 export function normalizeCommandTools(raw: unknown): CommandToolConfig[] {
   if (!Array.isArray(raw)) return [];
@@ -646,38 +535,7 @@ export function normalizeCommandTools(raw: unknown): CommandToolConfig[] {
   return out;
 }
 
-/** Validated guest command-tool configs (legacy `guestPolicy.commandTools`). */
-export function getGuestCommandTools(cfg: AppConfig): CommandToolConfig[] {
-  return normalizeCommandTools(getGuestPolicy(cfg)?.commandTools);
-}
-
-/**
- * The hard allowlist of tool names a guest may call: command-tool names plus
- * any `extraToolAllowlist` entries (deduped). Enforced by the guest hook.
- */
-export function getGuestToolAllowlist(cfg: AppConfig): string[] {
-  const policy = getGuestPolicy(cfg);
-  if (!policy) return [];
-  const names = getGuestCommandTools(cfg).map((t) => t.name);
-  const extra = Array.isArray(policy.extraToolAllowlist)
-    ? policy.extraToolAllowlist.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim())
-    : [];
-  return [...new Set([...names, ...extra])];
-}
-
-/** Whether guests may use the Feishu host tools. Default false. */
-export function getGuestFeishuHostTools(cfg: AppConfig): boolean {
-  return getGuestPolicy(cfg)?.feishuHostTools === true;
-}
-
-/** Guest-only system prompt to append, or undefined when unset/blank. */
-export function getGuestSystemPrompt(cfg: AppConfig): string | undefined {
-  const raw = getGuestPolicy(cfg)?.systemPrompt;
-  if (typeof raw !== 'string' || raw.trim() === '') return undefined;
-  return raw;
-}
-
-/** Per-run (per-turn) tool-call caps enforced by the guest hook. */
+/** Per-run (per-turn) tool-call caps enforced by a restricted profile's hook. */
 export interface GuestToolLimits {
   /** Total tool calls allowed across all tools. 0 = no total cap. */
   maxTotal: number;
@@ -685,14 +543,26 @@ export interface GuestToolLimits {
   perTool: Record<string, number>;
 }
 
-/** Resolve guest tool-call caps from policy (total + per-command-tool). */
-export function getGuestToolLimits(cfg: AppConfig): GuestToolLimits {
-  const raw = getGuestPolicy(cfg)?.maxToolCalls;
-  const maxTotal =
-    typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
-  const perTool: Record<string, number> = {};
-  for (const t of getGuestCommandTools(cfg)) {
-    if (typeof t.maxCalls === 'number') perTool[t.name] = t.maxCalls;
+/**
+ * Legacy fields removed with the unified policy model. Fail FAST at startup —
+ * silently ignoring security-relevant config would fail open.
+ */
+export function assertNoLegacyPolicyFields(cfg: Partial<AppConfig>): void {
+  const offenders: string[] = [];
+  const prefs = cfg.preferences as Record<string, unknown> | undefined;
+  if (prefs && 'guestPolicy' in prefs) offenders.push('preferences.guestPolicy');
+  const relay = cfg.relay as Record<string, unknown> | undefined;
+  if (relay && 'route' in relay) offenders.push('relay.route');
+  if (offenders.length > 0) {
+    throw new Error(
+      `配置包含已移除的 legacy 字段：${offenders.join('、')}。` +
+        `请迁移到统一 policy（见 CONFIGURATION.zh.md §13）：` +
+        `guestPolicy → profiles + rules；relay.route.users → principals.<组>.run: "worker"。`,
+    );
   }
-  return { maxTotal, perTool };
+  // Non-fatal: fields removed in later cleanups that carried no access-control
+  // semantics — just note they're ignored rather than silently vanishing.
+  for (const key of ['codexBinary', 'codexModel', 'messageReplyMigrated']) {
+    if (prefs && key in prefs) log.info('config', 'ignoring-removed-field', { field: `preferences.${key}` });
+  }
 }

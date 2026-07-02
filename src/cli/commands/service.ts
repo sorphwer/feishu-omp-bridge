@@ -18,6 +18,11 @@ export interface ServiceStartOptions {
 /**
  * Resolve the adapter for the current platform, or exit with a helpful
  * message. All service-level commands gate on this.
+ *
+ * `getServiceAdapter()` throws (not returns null) for `win32` with its own
+ * explicit "removed" message, so the null branch below is only reached on
+ * platforms that were never supported (e.g. freebsd) — hence the plain
+ * "unsupported" message with no per-OS roadmap promise.
  */
 function requireAdapter(cmdName: string): ServiceAdapter {
   const adapter = getServiceAdapter();
@@ -26,7 +31,6 @@ function requireAdapter(cmdName: string): ServiceAdapter {
       `${cmdName}: 当前系统不支持后台运行。`,
     );
     console.error('  目前支持: macOS (launchd) / Linux (systemd)');
-    console.error('  Windows 支持后续版本。');
     process.exit(1);
   }
   return adapter;

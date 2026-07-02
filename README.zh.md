@@ -4,7 +4,7 @@
 
 ## 能干什么
 
-- 在飞书私聊、群聊 `@bot`、话题群 topic、云文档评论 `@bot` 中把消息转给本地 OMP。
+- 在飞书私聊、群聊 `@bot`、话题群 topic 中把消息转给本地 OMP。
 - 流式卡片展示 OMP 文本、thinking、工具调用、工具更新和工具输出。
 - 把 OMP 原生 UI 请求（`confirm`、`select`、`input`、`editor`）映射成飞书交互卡片，并把用户选择实时写回同一个 RPC run。
 - 在飞书输出里展示 OMP extension 的 `notify`、`setStatus`、`setWidget`、`setTitle`、`set_editor_text` 和 `open_url` 事件。
@@ -12,7 +12,7 @@
 - 注册只读 `feishu://` host URI scheme，例如 `feishu://current/context` 和 `feishu://message/<message_id>`。
 - OMP 运行中同一 chat/topic 再发消息会直接进入当前 run 的 `follow_up`；消息以 `!` 开头则作为 `steer`。
 - 每个 chat / topic 保存自己的 OMP session id，下一轮自动用 `omp --mode rpc --resume <session_id>` 继续。
-- 保留 bridge 命令：`/new`、`/cd`、`/ws`、`/status`、`/config`、`/switch`、`/stop`、`/timeout`、`/ps`、`/exit`、`/reconnect`、`/doctor`。
+- 保留 bridge 命令：`/new`、`/cd`、`/ws`、`/status`、`/config`、`/switch`、`/stop`、`/ps`、`/exit`、`/reconnect`、`/doctor`。
 - 图片 / 文件会下载到本地路径；图片会转成 OMP RPC image payload。
 - OMP 可以继续使用本机可用工具，例如 `lark-cli`、`git`、项目测试命令等。
 
@@ -81,7 +81,7 @@ feishu-omp-bridge unregister            删除 daemon 注册文件
 
 - macOS：launchd user agent `ai.feishu-omp-bridge.bot`
 - Linux：systemd 用户单元 `feishu-omp-bridge.bot.service`
-- Windows：Task Scheduler 任务 `FeishuOmpBridge.Bot`
+- Windows：不支持（已移除 Task Scheduler 支持）；改用前台 `run`，或 WSL + systemd
 
 ## 飞书聊天命令
 
@@ -96,10 +96,8 @@ feishu-omp-bridge unregister            删除 daemon 注册文件
 | `/ws remove\|rm <name>` | 删除命名工作空间。 |
 | `/config` | 打开偏好设置卡片。 |
 | `/switch` | 弹卡片切换 OMP 模型：下拉列常用（role）模型，或输入框直接输入任意模型名（OMP 模糊匹配）。当前模型来自 `omp config modelRoles`，✅ 标已认证。写入 preferences.ompModel，立即生效，全局。 |
-| `/account`、`/account change` | 裸 `/account` 查看当前应用；`/account change` 更换 appId / secret 并重连。 |
 | `/status` | 查看当前 scope、cwd、session、agent。 |
 | `/stop` | 终止当前正在跑的 OMP 任务。 |
-| `/timeout [N|off|default]` | 设置当前 session 的 idle 探活分钟数，或关闭 / 恢复全局默认。 |
 | `/ps` | 列出本机所有 bot，并标识当前正在回复的进程。 |
 | `/exit <id|#>` | 关闭指定 bot 进程。 |
 | `/reconnect` | 强制重连 WebSocket。 |
@@ -108,13 +106,15 @@ feishu-omp-bridge unregister            删除 daemon 注册文件
 
 其他普通消息会直接交给 OMP。群聊默认需要 `@bot`；私聊不需要。
 
+换 App 凭据不再走聊天命令，改用 CLI：`feishu-omp-bridge secrets set --app-id <id>`（提示输入新 secret）+ `feishu-omp-bridge service restart`（或前台 `restart`）。
+
 ## 数据目录
 
 | 路径 | 用途 |
 | --- | --- |
 | `~/.feishu-omp-bridge/config.json` | App 凭据、secret refs、偏好配置。 |
 | `~/.feishu-omp-bridge/secrets.enc` | 本地加密 secret keystore。 |
-| `~/.feishu-omp-bridge/sessions.json` | 每个 chat / topic 的 OMP session id、cwd 和可选 timeout 覆盖。 |
+| `~/.feishu-omp-bridge/sessions.json` | 每个 (chat / topic, profile) 的 OMP session id、cwd 和更新时间。 |
 | `~/.feishu-omp-bridge/omp-sessions/` | bridge 专用 OMP JSONL session 文件。 |
 | `~/.feishu-omp-bridge/workspaces.json` | 命名工作空间映射。 |
 | `~/.feishu-omp-bridge/processes.json` | 当前运行的 bridge 进程注册表。 |
@@ -147,7 +147,7 @@ feishu-omp-bridge unregister            删除 daemon 注册文件
 - `ompThinking`：传给 `omp --thinking` 的思考级别；留空则由 OMP 自身配置决定。
 - `ompSessionDir`：本 bridge 使用的 OMP session 目录；默认 `~/.feishu-omp-bridge/omp-sessions`。
 - `ompTools`：传给 `omp --tools` 的逗号分隔工具白名单；留空则启用 OMP 默认工具集。
-- `messageReply`：`card`、`markdown` 或 `text`。
+- `messageReply`：`card` 或 `markdown`。
 - `showToolCalls`：是否在卡片 / Markdown 中展示工具调用过程。
 
 ## 飞书原生 OMP host 能力
@@ -168,13 +168,11 @@ bridge 还会注册只读 `feishu://` host URI：
 
 同一 chat/topic 在 OMP 运行中继续发消息时，会作为 `follow_up` 进入当前 run，而不是等当前 run 结束后另起一轮。消息以 `!` 开头时会作为 `steer` 发送。
 
-旧配置里的 `codexBinary` 和 `codexModel` 仍会作为 fallback 读取，便于旧配置启动后手动迁移。
-
 ## 故障排查
 
 - `run` 启动时报找不到 `omp`：确认 `omp --version` 可用，并先运行一次 `omp` 完成模型 / 认证配置。
 - OMP 没有继续上次对话：发 `/status` 查看 cwd 和 session；cwd 变化会让 bridge 自动新建 session。
 - 群聊没响应：确认消息里 `@bot`，或在 `/config` 里调整群聊 mention 策略。
-- 卡片长时间不动：可用 `/stop` 终止当前任务，或用 `/timeout 10` 为当前 session 开启 idle 探活。
+- 卡片长时间不动：可用 `/stop` 终止当前任务，或在 `config.json` 设置全局 `preferences.runIdleTimeoutMinutes` 开启 idle 探活（改后需 `restart`）。
 - OMP 等待选择 / 输入时：直接回复单独出现的“OMP 交互”卡片；该请求挂起期间 idle watchdog 会暂停。
 - 飞书 API 工具不可用：按启动提示安装并绑定 `lark-cli`。

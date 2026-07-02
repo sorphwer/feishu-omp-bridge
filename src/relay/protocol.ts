@@ -16,12 +16,12 @@ export const RELAY_PROTOCOL_VERSION = 1;
 export const RELAY_EVENTS_PATH = '/relay/v1/events';
 
 /** Feishu event families the bridge forwards. */
-export type RelayKind = 'message' | 'cardAction' | 'comment';
+export type RelayKind = 'message' | 'cardAction';
 
 /**
  * A forwarded Feishu event. `payload` is the SDK's normalized event object
- * (`NormalizedMessage` | `CardActionEvent` | `CommentEvent`) verbatim — these
- * are plain JSON that came off the wire, so they round-trip losslessly.
+ * (`NormalizedMessage` | `CardActionEvent`) verbatim — these are plain JSON
+ * that came off the wire, so they round-trip losslessly.
  */
 export interface RelayEvent {
   v: typeof RELAY_PROTOCOL_VERSION;
@@ -164,8 +164,6 @@ export const SSE_HEARTBEAT_MS = 15_000;
 interface MaybeRaw {
   raw?: { header?: { event_id?: string }; event_id?: string; token?: string };
   messageId?: string;
-  commentId?: string;
-  replyId?: string;
   operator?: { openId?: string };
   action?: unknown;
 }
@@ -180,7 +178,6 @@ export function naturalId(kind: RelayKind, payload: unknown): string {
   const eid = p.raw?.header?.event_id ?? p.raw?.event_id ?? p.raw?.token;
   if (eid) return `${kind}:${eid}`;
   if (kind === 'message' && p.messageId) return `m:${p.messageId}`;
-  if (kind === 'comment') return `k:${p.commentId ?? ''}:${p.replyId ?? ''}`;
   // cardAction with no envelope id: hash the stable-ish fields.
   const h = createHmac('sha256', 'relay-natural-id')
     .update(`${p.messageId ?? ''}|${p.operator?.openId ?? ''}|${JSON.stringify(p.action ?? null)}`)
