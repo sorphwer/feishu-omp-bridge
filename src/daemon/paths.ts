@@ -35,24 +35,6 @@ export function systemdUnitPath(): string {
   return join(base, 'systemd', 'user', SYSTEMD_UNIT_NAME);
 }
 
-// === Windows Task Scheduler ===
-
-/**
- * schtasks task name. Backslashes turn into Task Scheduler "folders" so
- * `FeishuOmpBridge\Bot` would create a Bot task under a FeishuOmpBridge
- * folder. We keep it flat for now.
- */
-export const WINDOWS_TASK_NAME = 'FeishuOmpBridge.Bot';
-
-/**
- * The wrapper .cmd script schtasks invokes. schtasks `/TR` accepts a
- * command line directly, but we want stdout/stderr redirection + a PATH
- * override, which means wrapping in a script.
- */
-export function windowsLauncherCmdPath(): string {
-  return join(paths.appDir, 'daemon-launcher.cmd');
-}
-
 // === Daemon log paths (platform-agnostic) ===
 
 /**

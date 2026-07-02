@@ -50,7 +50,7 @@ program
     await runKillCli(target);
   });
 
-// === service-level commands (OS-managed daemon: launchd/systemd/schtasks) ===
+// === service-level commands (OS-managed daemon: launchd/systemd; Windows unsupported) ===
 
 program
   .command('start')
