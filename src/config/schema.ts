@@ -275,9 +275,9 @@ export interface RelayConfig {
  *   - WHEN   `rules`:      first-match (scenario × principal × chat) -> profile.
  *   - WHERE  per-principal `run`: front (local) or worker (relayed to a laptop).
  *
- * Absent `policy` = back-compat: a policy is synthesized from the legacy
- * `preferences.access` / `preferences.guestPolicy` / `relay.route` fields (see
- * `synthesizeLegacyPolicy` in policy.ts), so deployed configs keep working.
+ * Absent `policy` = built-in open defaults: everyone gets `full` profile, no
+ * relay. Explicit `policy` is authoritative and fail-closed: a sender that
+ * matches no rule, or a rule naming an unknown profile, runs LOCKED (zero tools).
  * When `policy` IS present it is authoritative and fail-closed: a sender that
  * matches no rule, or a rule naming an unknown profile, runs LOCKED (zero
  * tools) rather than falling open to the full tool set.
