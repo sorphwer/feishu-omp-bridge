@@ -19,14 +19,3 @@ export const paths = {
   ompSessionsDir: join(appDir, 'omp-sessions'),
   guestDir: join(appDir, 'guest'),
 };
-
-export const legacyPaths = {
-  appDir: join(
-    process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'),
-    'feishu-codex-bridge',
-  ),
-  cacheDir: join(
-    process.env.XDG_CACHE_HOME ?? join(homedir(), '.cache'),
-    'feishu-codex-bridge',
-  ),
-};

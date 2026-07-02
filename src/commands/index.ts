@@ -1118,7 +1118,6 @@ async function submitSwitch(ctx: CommandContext): Promise<void> {
     let display: string | undefined;
     if (picked === '' || picked === OMP_DEFAULT_MODEL_VALUE) {
       delete prefs.ompModel;
-      delete prefs.codexModel; // legacy fallback read by getOmpModel
       display = undefined;
     } else {
       prefs.ompModel = picked;

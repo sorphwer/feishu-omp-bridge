@@ -128,10 +128,6 @@ export interface AppPreferences {
   ompSessionDir?: string;
   /** Optional comma-separated OMP tool allowlist passed as `--tools`. */
   ompTools?: string;
-  /** Legacy Codex executable name or path. Used only when `ompBinary` is absent. */
-  codexBinary?: string;
-  /** Legacy Codex model. Used only when `ompModel` is absent. */
-  codexModel?: string;
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
   /**
@@ -374,13 +370,13 @@ export function secretKeyForApp(appId: string): string {
 }
 
 export function getOmpBinary(cfg: AppConfig): string {
-  const raw = cfg.preferences?.ompBinary ?? cfg.preferences?.codexBinary;
+  const raw = cfg.preferences?.ompBinary;
   if (typeof raw !== 'string' || raw.trim() === '') return 'omp';
   return raw.trim();
 }
 
 export function getOmpModel(cfg: AppConfig): string | undefined {
-  const raw = cfg.preferences?.ompModel ?? cfg.preferences?.codexModel;
+  const raw = cfg.preferences?.ompModel;
   if (typeof raw !== 'string' || raw.trim() === '') return undefined;
   return raw.trim();
 }

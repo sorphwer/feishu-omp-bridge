@@ -28,9 +28,11 @@ describe('OMP preferences', () => {
     expect(getOmpModel(cfg({ ompModel: ' gpt-5.5 ' }))).toBe('gpt-5.5');
   });
 
-  it('falls back to legacy Codex binary and model when OMP fields are absent', () => {
-    expect(getOmpBinary(cfg({ codexBinary: ' /opt/bin/codex ' }))).toBe('/opt/bin/codex');
-    expect(getOmpModel(cfg({ codexModel: ' gpt-5.1 ' }))).toBe('gpt-5.1');
+  it('ignores legacy codexBinary/codexModel aliases', () => {
+    const cfg1 = { preferences: { codexBinary: '/usr/bin/fake' } } as never;
+    expect(getOmpBinary(cfg1)).toBe('omp');
+    const cfg2 = { preferences: { codexModel: 'gpt-5.1' } } as never;
+    expect(getOmpModel(cfg2)).toBeUndefined();
   });
 
   it('omits empty optional OMP flags', () => {

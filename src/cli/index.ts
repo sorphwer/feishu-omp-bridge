@@ -1,6 +1,5 @@
 import { Command } from 'commander';
 import pkg from '../../package.json';
-import { runMigrate } from './commands/migrate';
 import { runKillCli, runPs } from './commands/ps';
 import {
   runSecretsGet,
