@@ -108,7 +108,6 @@ export function helpCard(): object {
         '- `/new chat [name]` — 新建群+新会话，自动拉你进群',
         '- `/cd <path>` — 切换工作目录（会重置 session）',
         '- `/ws list|save <name>|use <name>|remove <name>` — 工作空间',
-        '- `/account` — 查看当前应用；`/account change` 换 appId/secret 并重连',
         '- `/config` — 调整偏好（消息回复方式、工具调用显示）',
         '- `/switch` — 切换 OMP 模型（弹卡片下拉选择，立即生效）',
         '- `/status` — 当前状态',

@@ -7,7 +7,7 @@ interface ManagedEntry {
 }
 
 // Module-local because state is per-process. Lost on restart, which is fine —
-// a new run of /account will mint a fresh card.
+// a new run of /config or /switch will mint a fresh card.
 const byMessageId = new Map<string, ManagedEntry>();
 
 export interface ManagedCardSendResult {
