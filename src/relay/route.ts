@@ -1,8 +1,4 @@
-import type {
-  CardActionEvent,
-  CommentEvent,
-  NormalizedMessage,
-} from '@larksuiteoapi/node-sdk';
+import type { CardActionEvent, NormalizedMessage } from '@larksuiteoapi/node-sdk';
 import type { AppConfig, PolicyScenario } from '../config/schema';
 import { relayRunTarget } from '../config/policy';
 import { log } from '../core/logger';
@@ -28,14 +24,13 @@ export interface RelaySink {
  * Routing is purely by sender/operator trust (see {@link relayRunTarget}).
  * That keeps guests local — they only ever interact with front-rendered cards,
  * so their card actions resolve on the front — while trusted users' messages
- * and the card clicks / comments they make are relayed to the worker. Follow-up
- * routing is automatic: a trusted user's next message is relayed too, and the
+ * and the card clicks they make are relayed to the worker. Follow-up routing
+ * is automatic: a trusted user's next message is relayed too, and the
  * worker's own active-run tracking turns it into a `follow_up` / `steer`.
  */
 export interface RelayRouter {
   routeMessage(msg: NormalizedMessage): boolean;
   routeCardAction(evt: CardActionEvent): Promise<boolean>;
-  routeComment(evt: CommentEvent): boolean;
 }
 
 export interface RelayRouterOptions {
@@ -83,12 +78,6 @@ export function createRelayRouter(opts: RelayRouterOptions): RelayRouter {
       const scenario = await opts.resolveScenario?.(evt.chatId);
       if (relayRunTarget(cfg, evt.operator.openId, scenario) !== 'worker') return false;
       return dispatch('cardAction', evt.chatId, evt);
-    },
-    routeComment(evt) {
-      // Doc comments have no chat scenario; pass undefined so an explicit
-      // relayScenarios restriction keeps them on the front.
-      if (relayRunTarget(cfg, evt.operator.openId, undefined) !== 'worker') return false;
-      return dispatch('comment', evt.fileToken, evt);
     },
   };
 }

@@ -1,7 +1,6 @@
 import { homedir, hostname } from 'node:os';
 import type {
   CardActionEvent,
-  CommentEvent,
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
@@ -45,7 +44,6 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
-import { handleCommentMention } from './comments';
 import { buildCommandTools } from './command-tools';
 import { buildProfileRunArgs, type GuestRunArgs } from './guest-lockdown';
 import { createFeishuHostIntegration } from './feishu-host';
@@ -63,16 +61,6 @@ import { startRelayWorker } from '../relay/worker';
 
 const DEBOUNCE_MS = 600;
 
-// Lark SDK logs API errors at error level even when the caller catches them.
-// These specific codes are EXPECTED in our flow (wiki-node lookup that
-// usually misses, fileComment.get that we deliberately let fall back to
-// .list) and the surrounding noise is already covered by our own logs.
-const SUPPRESSED_API_ERROR_CODES = new Set([
-  131005, // wiki.space.getNode "not found" — the doc isn't a wiki node
-  1069307, // drive.fileComment.get "not exist" — fall back to .list
-  1069302, // drive.fileCommentReply.create — whole-doc comments don't accept replies; fall back to fileComment.create
-]);
-
 function buildQuietLogger(): {
   error: (...m: unknown[]) => void;
   warn: (...m: unknown[]) => void;
@@ -80,26 +68,8 @@ function buildQuietLogger(): {
   debug: (...m: unknown[]) => void;
   trace: (...m: unknown[]) => void;
 } {
-  // Match either `{ code: <feishu-code> }` (the response data SDK logs as
-  // its second arg) or an AxiosError where the feishu code lives at
-  // `err.response.data.code` (which the SDK logs raw).
-  const codeFromObj = (m: unknown): number | undefined => {
-    if (!m || typeof m !== 'object') return undefined;
-    const top = (m as { code?: unknown }).code;
-    if (typeof top === 'number') return top;
-    const nested = (m as { response?: { data?: { code?: unknown } } })?.response?.data?.code;
-    return typeof nested === 'number' ? nested : undefined;
-  };
-  const isSuppressed = (msg: unknown): boolean => {
-    if (Array.isArray(msg)) return msg.some(isSuppressed);
-    const code = codeFromObj(msg);
-    return code !== undefined && SUPPRESSED_API_ERROR_CODES.has(code);
-  };
   return {
-    error: (...args: unknown[]) => {
-      if (args.some(isSuppressed)) return;
-      log.warn('sdk', 'error', { args: stringifyArgs(args) });
-    },
+    error: (...args: unknown[]) => log.warn('sdk', 'error', { args: stringifyArgs(args) }),
     warn: (...args: unknown[]) => log.warn('sdk', 'warn', { args: stringifyArgs(args) }),
     info: (...args: unknown[]) => log.info('sdk', 'info', { args: stringifyArgs(args) }),
     debug: () => {},
@@ -179,14 +149,13 @@ function buildChannelOptions(
 
 /**
  * The per-instance message pipeline bound to one channel: intake → debounce →
- * run, plus card-action and comment handling. Both the front (driven by the
- * Feishu WS) and a worker (driven by relayed events) build one of these and
- * feed it events through the same three `dispatch*` entry points.
+ * run, plus card-action handling. Both the front (driven by the Feishu WS)
+ * and a worker (driven by relayed events) build one of these and feed it
+ * events through the same two `dispatch*` entry points.
  */
 export interface BridgeRuntime {
   dispatchMessage(msg: NormalizedMessage): Promise<void>;
   dispatchCardAction(evt: CardActionEvent): Promise<void>;
-  dispatchComment(evt: CommentEvent): Promise<void>;
   /** Shared chat-mode cache (p2p/group/topic). Reused by the relay router to
    * resolve a card action's scenario for per-principal `relayScenarios`. */
   readonly chatModeCache: ChatModeCache;
@@ -277,7 +246,6 @@ export function createBridgeRuntime(deps: BridgeRuntimeDeps): BridgeRuntime {
         pending,
         chatModeCache,
       }),
-    dispatchComment: (evt) => handleCommentMention({ channel, evt, agent, sessions, workspaces, cfg: controls.cfg }),
     shutdown: async () => {
       pending.cancelAll();
       await activeRuns.stopAll();
@@ -339,12 +307,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         if (await router?.routeCardAction(evt)) return;
         await runtime.dispatchCardAction(evt);
       }).catch((err) => log.fail('cardAction', err));
-    },
-    comment: async (evt) => {
-      await withTrace({ chatId: 'comment' }, async () => {
-        if (router?.routeComment(evt)) return;
-        await runtime.dispatchComment(evt);
-      }).catch((err) => log.fail('comment', err));
     },
     reconnecting: () => {
       consecutiveReconnects++;
@@ -472,8 +434,6 @@ export async function startWorker(deps: StartChannelDeps): Promise<BridgeChannel
           await runtime.dispatchMessage(event.payload as NormalizedMessage);
         } else if (event.kind === 'cardAction') {
           await runtime.dispatchCardAction(event.payload as CardActionEvent);
-        } else if (event.kind === 'comment') {
-          await runtime.dispatchComment(event.payload as CommentEvent);
         }
       }).catch((err) => log.fail('relay', err, { phase: 'inject', id: event.id }));
     },

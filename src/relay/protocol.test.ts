@@ -70,10 +70,6 @@ describe('naturalId', () => {
     expect(naturalId('message', { messageId: 'om_42' })).toBe('m:om_42');
   });
 
-  it('keys comments by comment + reply id', () => {
-    expect(naturalId('comment', { commentId: 'c1', replyId: 'r1' })).toBe('k:c1:r1');
-  });
-
   it('is deterministic for card actions without an envelope id', () => {
     const payload = { messageId: 'm1', operator: { openId: 'ou_a' }, action: { value: { x: 1 } } };
     const a = naturalId('cardAction', payload);
