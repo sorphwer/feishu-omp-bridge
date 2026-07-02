@@ -346,3 +346,17 @@ const DEFAULT_OPEN_POLICY: PolicyConfig = {
 export function effectivePolicy(cfg: AppConfig): PolicyConfig {
   return cfg.policy ?? DEFAULT_OPEN_POLICY;
 }
+
+/**
+ * True when at least one principal in `policy.principals` is worker-routed
+ * (`run: 'worker'`). A `relay.role: 'front'` with no worker-routed principal
+ * relays nobody — there used to be a fallback (`guestPolicy.unrestrictedUsers`
+ * → `access.admins`) that auto-relayed trusted users in that case; it was
+ * removed with the unified policy model, so this is now silent by design and
+ * callers should warn instead of assuming a relay target exists.
+ */
+export function hasWorkerPrincipal(policy: PolicyConfig): boolean {
+  return Object.values(policy.principals ?? {}).some(
+    (raw) => normalizePrincipal(raw).run === 'worker',
+  );
+}

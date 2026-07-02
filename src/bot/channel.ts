@@ -36,7 +36,7 @@ import {
   isChatAllowed,
   isUserAllowed,
 } from '../config/schema';
-import { injectionDecision, resolveBatchProfile } from '../config/policy';
+import { effectivePolicy, hasWorkerPrincipal, injectionDecision, resolveBatchProfile } from '../config/policy';
 import { resolveAppSecret, resolveRelaySecret } from '../config/secret-resolver';
 import { log, withTrace } from '../core/logger';
 import { MediaCache, type LocalAttachment } from '../media/cache';
@@ -285,6 +285,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     });
     log.info('relay', 'front-ready', { address: relayServer.address });
     console.log(`relay front 已监听 ${relayServer.address}（worker 拨入此地址）\n`);
+
+    // Sanity warning, not a hard failure: a front with no worker-routed
+    // principal relays nobody. This used to auto-relay `access.admins` via a
+    // fallback chain (relay.route.users → guestPolicy.unrestrictedUsers →
+    // access.admins) that was removed with the unified policy model — a
+    // config carrying `relay: {role:'front'}` + non-empty `access.admins` but
+    // no `policy` now silently relays no one, which is a legitimate but easy
+    // to overlook config shape (e.g. relay configured before principals).
+    if (!hasWorkerPrincipal(effectivePolicy(cfg))) {
+      log.warn('relay', 'no-worker-principal', {});
+      console.warn(
+        "relay front 已配置，但 policy 未指定任何 run:'worker' 的 principal——不会中继任何人到 worker。旧 access.admins 自动中继已移除，见 CONFIGURATION.zh.md §13。",
+      );
+    }
   }
 
   // Counter for stdout reconnect escalation; reset on `reconnected`.

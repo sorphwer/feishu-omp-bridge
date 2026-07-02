@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { paths } from './paths';
 import {
   effectivePolicy,
+  hasWorkerPrincipal,
   injectionDecision,
   principalOf,
   relayRunTarget,
@@ -29,6 +30,38 @@ describe('effectivePolicy without explicit policy', () => {
     const { profile } = resolveBatchProfile(c, ['ou_anyone'], { chat: 'group' });
     expect(profile.name).toBe('full');
     expect(relayRunTarget(c, 'ou_anyone', 'p2p')).toBe('front');
+  });
+});
+
+describe('hasWorkerPrincipal', () => {
+  it('is false for the built-in open default (wizard + hand-added relay, no policy)', () => {
+    // Repro of the "wizard-generated + hand-added relay" config shape: a
+    // `relay: {role:'front'}` plus non-empty `access.admins` but NO explicit
+    // `policy` — the removed guestPolicy/access.admins auto-relay fallback
+    // used to route these admins to a worker; now there is no such fallback,
+    // so a front started with only this shape relays nobody.
+    const c = cfg({
+      relay: { role: 'front' },
+      preferences: { access: { admins: ['ou_admin'] } },
+    });
+    expect(hasWorkerPrincipal(effectivePolicy(c))).toBe(false);
+  });
+
+  it('is false when every principal is shorthand (string[] = run: front)', () => {
+    const policy: PolicyConfig = { principals: { team: ['ou_a', 'ou_b'] } };
+    expect(hasWorkerPrincipal(policy)).toBe(false);
+  });
+
+  it('is false when a principal explicitly sets run: front', () => {
+    const policy: PolicyConfig = { principals: { owner: { users: ['ou_a'], run: 'front' } } };
+    expect(hasWorkerPrincipal(policy)).toBe(false);
+  });
+
+  it('is true when at least one principal sets run: worker', () => {
+    const policy: PolicyConfig = {
+      principals: { team: ['ou_a'], owner: { users: ['ou_b'], run: 'worker' } },
+    };
+    expect(hasWorkerPrincipal(policy)).toBe(true);
   });
 });
 

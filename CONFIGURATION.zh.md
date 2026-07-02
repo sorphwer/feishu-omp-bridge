@@ -782,6 +782,7 @@ guestPolicy → profiles + rules；relay.route.users → principals.<组>.run: "
 | `guestPolicy.maxToolCalls` | 已删除 | 挪进受限 profile 的 `maxToolCalls` |
 | `guestPolicy.systemPrompt` | 已删除 | 挪进受限 profile 的 `systemPrompt` |
 | `relay.route.users` | 已删除 | 对应 principal 设 `run: "worker"`，如 `principals.owner = { users: [...], run: "worker" }` |
+| 无 `relay.route` 时回落 `access.admins` 自动中继 | 已删除（无替代回落链） | 显式给对应 principal 设 `run: "worker"`；`relay: {role:'front'}` 配合非空 `access.admins` 但没有任何 `run:"worker"` principal 时，bot 会在启动时打印一条 `no-worker-principal` 警告（非致命）提醒补上 |
 | `preferences.access.{allowedUsers,allowedChats,admins}` | **保留，未变** | 原样使用；与 `policy` 正交，始终生效 |
 
 一份完整「群聊受限、我私聊全开、陌生人锁死」的等价写法见 [配方 2](#配方-2--群聊给受限工具我私聊全开陌生人锁死)；`run: "worker"` 中继的完整写法见 [§11](#11-frontworker-路由与-relaysecret)。
