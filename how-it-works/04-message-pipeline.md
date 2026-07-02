@@ -1,8 +1,8 @@
 # 04 · 消息管线（脊柱）
 
-> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `103dd04`（文档对应的源码 commit；详见 [README](./README.md)）。
 
-> 覆盖范围：从规范化消息进入 runtime，到 agent 流式回写飞书的端到端主线——`createBridgeRuntime`、`intakeMessage`、`submitToActiveRun`、`PendingQueue`、`ProcessPool`、`runAgentBatch`、`driveAgent`（resume 自愈）、`processAgentStream`、`reapRun`、三种回复模式、`buildPrompt`、`ActiveRuns`。
+> 覆盖范围：从规范化消息进入 runtime，到 agent 流式回写飞书的端到端主线——`createBridgeRuntime`、`intakeMessage`、`submitToActiveRun`、`PendingQueue`、`ProcessPool`、`runAgentBatch`、`driveAgent`（resume 自愈）、`processAgentStream`、`reapRun`、两种回复模式、`buildPrompt`、`ActiveRuns`。
 >
 > 源文件：`src/bot/channel.ts`（`createBridgeRuntime`/`intakeMessage`/`submitToActiveRun`/`runAgentBatch`/`processAgentStream`/`reapRun`/`buildPrompt`/`buildBridgeContextHeader`/`expandedMessageContent`/`stripAttachmentRefs`）、`src/bot/scope.ts`（`scopeFor`/`scopeForMessage`）、`src/bot/pending-queue.ts`、`src/bot/process-pool.ts`、`src/bot/active-runs.ts`、`src/bot/reaction.ts`（`addReaction`/`removeReaction`）、`src/config/policy.ts`（`injectionDecision`/`resolveBatchProfile`）、`src/session/store.ts`（`resumeFor`/`set`/`clearProfile`）。
 
@@ -40,7 +40,7 @@ flowchart TD
   RES --> BADGE["RunBadge 快照<br/>(仅 group/topic)"]
   BADGE --> SPAWN["spawnHandle: agent.run(...)<br/>+ activeRuns.register(scope, run, profile.name)"]
   SPAWN --> DRIVE["driveAgent → processAgentStream<br/>(resume-miss 自愈重试一次)"]
-  DRIVE --> REND["card / markdown / text 流式渲染"]
+  DRIVE --> REND["card / markdown 流式渲染"]
 ```
 
 一次完整对话的时序：
@@ -85,7 +85,7 @@ sequenceDiagram
 
 ## 1. `createBridgeRuntime`：每实例管线
 
-`createBridgeRuntime(deps)` 组装一套绑定到某个 `channel` 的管线，front 与 worker 都构造一份并通过三个 `dispatch*` 喂事件：
+`createBridgeRuntime(deps)` 组装一套绑定到某个 `channel` 的管线，front 与 worker 都构造一份并通过两个 `dispatch*` 喂事件：
 
 - `activeRuns = new ActiveRuns()`、`chatModeCache = new ChatModeCache()`、`pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg))`（cap 每次 acquire 现读，故 `/config` 改并发数下一 run 生效）、`media = new MediaCache(channel)`。
 - `pending = new PendingQueue(DEBOUNCE_MS=600, onFlush)`，`onFlush(scope, batch)` 是核心 run-chain：
@@ -105,9 +105,9 @@ flowchart LR
   FIN -.->|"残留消息重新武装 600ms"| FLUSH
 ```
 
-`BridgeRuntime` 接口除三个 `dispatch*` 与 `shutdown` 外，还暴露只读的 **`chatModeCache`** 字段——front 侧 `startChannel` 创建 relay router 时把 `resolveScenario: (chatId) => runtime.chatModeCache.resolve(channel, chatId)` 传给 `createRelayRouter`，供 per-principal `relayScenarios` 门控解析卡片回调的场景（多数命中缓存）；相应地 `routeCardAction` 已是 async，cardAction 分发处 `await router?.routeCardAction(evt)`（见 [03](./03-feishu-transport.md)）。
+`BridgeRuntime` 接口除两个 `dispatch*` 与 `shutdown` 外，还暴露只读的 **`chatModeCache`** 字段——front 侧 `startChannel` 创建 relay router 时把 `resolveScenario: (chatId) => runtime.chatModeCache.resolve(channel, chatId)` 传给 `createRelayRouter`，供 per-principal `relayScenarios` 门控解析卡片回调的场景（多数命中缓存）；相应地 `routeCardAction` 已是 async，cardAction 分发处 `await router?.routeCardAction(evt)`（见 [03](./03-feishu-transport.md)）。
 
-`dispatchMessage`→`intakeMessage`、`dispatchCardAction`→`handleCardAction`（见 [05](./05-streaming-and-cards.md)）、`dispatchComment`→`handleCommentMention`（见 [03](./03-feishu-transport.md)）、`shutdown`→`pending.cancelAll()` + `activeRuns.stopAll()` + flush stores。
+`dispatchMessage`→`intakeMessage`、`dispatchCardAction`→`handleCardAction`（见 [05](./05-streaming-and-cards.md)）、`shutdown`→`pending.cancelAll()` + `activeRuns.stopAll()` + flush stores。云文档评论管线（曾经的 `dispatchComment`→`handleCommentMention`）已整体移除——@bot 评论不再触发任何响应。
 
 ## 2. `intakeMessage`：门控与分流
 
@@ -173,12 +173,12 @@ FIFO 并发上限。`acquire()`：若 `active < cap()` 则占位返回 `release`
 8. **profile 工具面**：`guestArgs = buildProfileRunArgs(profile)`（仅**受限** profile 出 `--tools`/hook，discovery/memory 任一关时出 overlay，`full` 返回空）；`commandTools = buildCommandTools(profile.commandTools, cwd)`；host tools 按 `profile.feishuHostTools` 决定是否在 command tools 上并入 feishu host tools + `feishu://` scheme；`profile.systemPrompt` **前置**到 prompt。
 9. **RunBadge 快照**：`mode === 'p2p'` 时无 badge；group/topic 时 `badge = { profileName: profile.name, restricted: profile.restricted, owner: firstMsg.senderName }`——**run 启动时快照**、绝非实时 cfg 查询（防 mid-stream `/config` 改动错标权限）。`runInitialState = badge ? { ...initialState, badge } : initialState`，badge 从第一帧就 seed 进 `RunState`，卡片/markdown 顶部徽章让共享群里的所有人看到本次对话持有什么权限、由谁触发（也解释了低权成员的 mid-run 消息为何被 defer）。渲染见 [05](./05-streaming-and-cards.md)。
 10. **`spawnHandle` 闭包**：`spawnHandle = (sessionId) => activeRuns.register(scope, agent.run({prompt:runPrompt, sessionId, cwd, model:getOmpModel(cfg), imagePaths, stopGraceMs:getAgentStopGraceMs(cfg), hostTools, hostUriSchemes, tools/configOverlayPaths/extensionPaths}), profile.name)`——注册时带 `profile.name`，供 §3 的注入门控读取；做成闭包是为了 resume 自愈重试时可以用 `undefined` sessionId 再 spawn 一次（见 §7）。
-11. **idle-timeout 解析**：scope 覆盖（`sessions.getIdleTimeoutMinutes`）优先于全局默认（`getRunIdleTimeoutMs`）；0/undefined = 无看门狗。
+11. **idle-timeout 解析**：只有全局默认（`getRunIdleTimeoutMs(cfg)`，来自 `preferences.runIdleTimeoutMinutes`）；per-scope 的 `/timeout` 覆盖已移除，0/undefined = 无看门狗。
 12. **回复模式**：`replyMode = getMessageReplyMode(cfg)`（默认 `markdown`，见 §8）。`filterForPrefs(state)` 在 `getShowToolCalls` 关时滤掉 tool block（每 flush 现读）。
 13. **回复线程化**：`sendOpts = { replyTo:lastMsg.messageId, ...(threadId?{replyInThread:true}:{}) }`——只要消息带 `threadId` 就 `replyInThread:true`（不再限 topic 模式；话题化普通群同样受益，否则 SDK 会把回复发到群顶层、打断话题内讨论）。
 14. **UI hooks**：`uiHooks.onUiRequest`/`onUiCancel` 用托管卡片渲染 OMP 交互（见 [05](./05-streaming-and-cards.md)）。
 15. **`driveAgent` 定义**：包装 `processAgentStream` 并实现 resume-miss 自愈（见 §7）；`finally` 里 `activeRuns.unregister(scope, handle.run)`。
-16. **working reaction**：非 card 模式给触发消息 `addReaction(channel, lastMsg.messageId)`（默认 emoji `REACTION_WORKING='Typing'`，“敲键盘”）作即时回执——markdown 模式要等第一个 token、text 模式要等整个 run 结束才有可见输出；card 模式初始卡片自带“正在思考…”footer，免。
+16. **working reaction**：markdown 模式给触发消息 `addReaction(channel, lastMsg.messageId)`（默认 emoji `REACTION_WORKING='Typing'`，“敲键盘”）作即时回执——因为要等第一个 token 才有可见输出；card 模式初始卡片自带“正在思考…”footer，免。
 17. **按模式驱动流**（见 §8），外层 `finally` 移除 reaction。
 
 ## 7. `driveAgent` + `processAgentStream`：事件流驱动与 resume 自愈
@@ -251,15 +251,14 @@ sequenceDiagram
 - **interrupted**（用户 `/stop`、idle 看门狗、断连）：`stop()` 已被置 interrupted 的一方 fire-and-forget 发出，这里 `await handle.run.stop()` 等它完成。
 - **自然结束**：`agent_end` 可能先于 OMP 关 stdout 到达；`waitForExit(POST_DONE_EXIT_GRACE_MS=2000)` 等它以 code 0 退出，超时才 `stop()`（SIGTERM 兜底，此时卡片早已渲染终态，用户无感）。
 
-## 8. 三种回复模式与 `buildPrompt`
+## 8. 两种回复模式与 `buildPrompt`
 
-三种模式**共用 `driveAgent`**（从而共享 resume 自愈与 `processAgentStream`），唯一区别是 `flush(state)` 拿到状态后做什么：
+两种模式**共用 `driveAgent`**（从而共享 resume 自愈与 `processAgentStream`），唯一区别是 `flush(state)` 拿到状态后做什么：
 
 - **markdown**（**默认**）：`channel.stream(chatId, {markdown: ctrl => driveAgent(state => ctrl.setContent(renderText(filterForPrefs(state))))}, sendOpts)`。`renderText` 顶行带 `badgeLine()` profile 徽章（如 `🔒 **guest（受限）** · @张三`；见 [05](./05-streaming-and-cards.md)）。
 - **card**：`channel.stream(chatId, {card:{initial:renderCard(runInitialState), producer: ctrl => driveAgent(state => ctrl.update(renderCard(filterForPrefs(state))))}}, sendOpts)`——初始卡片就含 badge header。
-- **text**：run 期间不发，只累积 `finalState`（初值 `runInitialState`）；结束后 `body = renderText(filterForPrefs(finalState))`，`body.trim()` 非空才一次性 `channel.send(chatId, {markdown: body}, sendOpts)`（msg_type=post，无流式、无打字机）。
 
-> 默认值细节（`getMessageReplyMode`，`src/config/schema.ts`）：未设 `messageReply` 的新配置默认 `'markdown'`；0.1.27 前配置里的 `'text'` 在 `messageReplyMigrated !== true` 时也被强制映射为 `'markdown'`（老用户当年选 text 实际想要的就是现在的流式 markdown）。
+> 默认值细节（`getMessageReplyMode`，`src/config/schema.ts`）：未设 `messageReply` 的配置默认 `'markdown'`；曾经的第三种模式 `'text'`（跑完一次性发送、无流式）连同它的迁移标记 `messageReplyMigrated` 已一并删除——现在任何非 `'card'`/`'markdown'` 的值（含历史遗留的 `'text'`）都直接回落 `'markdown'`，不再需要迁移标记判断。
 
 > 卡片节奏说明：bridge 侧**不再额外节流**——每个事件都 flush，靠 SDK 的 `streamThrottleMs:400` 与卡片 `streaming_mode` 限速。
 

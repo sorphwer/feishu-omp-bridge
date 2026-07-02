@@ -1,6 +1,6 @@
 # feishu-omp-bridge
 
-把飞书 / Lark 消息接入本地 Oh My Pi CLI 的桥接服务。它会把私聊、群聊、话题群、云文档评论中的消息转给 `omp --mode rpc`，再把 OMP 的文本、thinking、工具调用、工具增量、原生 UI 交互和结果流式回写到飞书。
+把飞书 / Lark 消息接入本地 Oh My Pi CLI 的桥接服务。它会把私聊、群聊、话题群中的消息转给 `omp --mode rpc`，再把 OMP 的文本、thinking、工具调用、工具增量、原生 UI 交互和结果流式回写到飞书。
 
 ## 项目定位
 
@@ -30,7 +30,7 @@ flowchart TD
 
 ### 消息与会话
 
-- 支持飞书 / Lark 私聊、普通群聊 `@bot`、话题群 topic、云文档评论 `@bot`。
+- 支持飞书 / Lark 私聊、普通群聊 `@bot`、话题群 topic。
 - 每个 chat / topic 独立保存 OMP session id，并通过 `omp --mode rpc --resume <session_id>` 续聊。
 - 话题群按 `chatId:threadId` 隔离 session、cwd、pending queue 和 active run。
 - 支持图片输入：飞书图片会下载到本地缓存，再转成 OMP RPC image payload。
@@ -186,7 +186,7 @@ node bin/feishu-omp-bridge.mjs unregister # 删除 daemon 注册文件
 | --- | --- | --- |
 | macOS | launchd user agent | `ai.feishu-omp-bridge.bot` |
 | Linux | systemd user unit | `feishu-omp-bridge.bot.service` |
-| Windows | Task Scheduler | `FeishuOmpBridge.Bot` |
+| Windows | 不支持（已移除 Task Scheduler 支持） | 改用前台 `run`，或 WSL + systemd |
 
 进程级命令：
 
@@ -258,7 +258,7 @@ node bin/feishu-omp-bridge.mjs secrets get                      # exec-provider 
 | `ompThinking` | 未设置 | 传给 `omp --thinking`。 |
 | `ompSessionDir` | `~/.feishu-omp-bridge/omp-sessions` | bridge 专用 OMP session 目录。 |
 | `ompTools` | 未设置 | 传给 `omp --tools` 的逗号分隔工具白名单；留空使用 OMP 默认工具集。 |
-| `messageReply` | `markdown` | `card`、`markdown` 或 `text`。推荐使用 `card` 以获得完整交互。 |
+| `messageReply` | `markdown` | `card` 或 `markdown`。推荐使用 `card` 以获得完整交互。 |
 | `showToolCalls` | `true` | 是否展示工具调用过程。 |
 | `maxConcurrentRuns` | `10` | 全局并发 OMP run 上限，范围按代码限制到最多 50。 |
 | `runIdleTimeoutMinutes` | 关闭 | OMP 长时间无输出时的 idle kill 分钟数；`0` 或未设置表示关闭。 |
@@ -286,64 +286,16 @@ node bin/feishu-omp-bridge.mjs secrets get                      # exec-provider 
 - `allowedUsers` 空或未设置：允许所有用户。
 - `allowedChats` 空或未设置：允许所有 chat。
 - `admins` 空或未设置：所有允许用户都可执行管理员命令。
-- 管理员命令包括：`/account`、`/config`、`/switch`、`/exit`、`/reconnect`、`/doctor`、`/cd`、`/ws`。
+- 管理员命令包括：`/config`、`/switch`、`/exit`、`/reconnect`、`/doctor`、`/cd`、`/ws`。
+- 换 App 凭据不再走聊天命令，改用 CLI：`node bin/feishu-omp-bridge.mjs secrets set --app-id <id>`（提示输入新 secret，不回显）+ `service restart`（或前台 `restart`）。
 
-### 访客工具沙箱（`preferences.guestPolicy`，旧字段）
+### 访客工具沙箱（旧 `preferences.guestPolicy`，已移除）
 
-> 旧字段，**仍可用**（无 `policy` 时自动合成等价策略）。新部署推荐用统一 [`policy`](#统一策略policy进阶)（按场景/身份选 profile、多 profile、自定义 hook、front/worker），完整配方见 [配置指南 CONFIGURATION.zh.md](./CONFIGURATION.zh.md)。
+`preferences.guestPolicy` 与 `relay.route` 字段已经从代码里删除——不再有自动合成，配置里如果还留着它们，启动或 `restart` 时会被 `assertNoLegacyPolicyFields` 直接拒绝并报错。按发送者身份/场景限制 agent 工具集，现在统一用下面的 [`policy`](#统一策略policy) 表达：非信任用户只能用白名单 CLI、信任用户全权，就是一个受限 `profile` + 对应 `rules` 的组合。旧字段到新写法的完整对照表见 [配置指南 CONFIGURATION.zh.md §13](./CONFIGURATION.zh.md#13-legacy-字段已移除与迁移对照)。
 
-对**非信任发送者**(例如陌生人私聊 bot)限制 agent 能用的工具,信任用户(你自己)不受任何影响、保留全部工具。
+### 统一策略（`policy`）
 
-```json
-{
-  "preferences": {
-    "guestPolicy": {
-      "unrestrictedUsers": ["ou_xxx"],
-      "commandTools": [
-        {
-          "name": "zendesk_kg",
-          "command": "zendesk-kg",
-          "allowedSubcommands": ["search", "stats", "health", "rate"],
-          "appendArgs": ["-o", "json"],
-          "maxOutputBytes": 100000,
-          "description": "Query the Zendesk Knowledge Graph (JSON with issue/solution summaries)."
-        },
-        {
-          "name": "zendesk_docs",
-          "command": "zendesk",
-          "args": ["docs"],
-          "allowedSubcommands": ["search"],
-          "appendArgs": ["-o", "text"],
-          "maxOutputBytes": 100000,
-          "description": "Search the Zendesk Help Center (public docs/articles), plain-text output. First arg must be `search`; then `--query '<text>'` (+ optional filters)."
-        }
-      ],
-      "extraToolAllowlist": [],
-      "feishuHostTools": false,
-      "systemPrompt": "你是面向同事的 Zendesk 助手:zendesk_kg 查/析历史工单、zendesk_docs 搜帮助中心文档(客户信息已脱敏)。"
-    }
-  }
-}
-```
-
-语义:
-
-- **未设置 `guestPolicy`**:功能关闭,所有人都用完整工具集(向后兼容)。
-- **设置后**:符合沙箱范围(见下)的消息以受限方式运行 OMP——
-  - `commandTools` 把指定 CLI 暴露成 host tool。bridge 用 `spawn`(argv 数组、**不走 shell**)拉起,模型只能跑该二进制,无法注入管道/重定向/命令拼接。`args` 固定前缀、`appendArgs` 固定后缀(放在模型参数之后,例如 `["-o","json"]` 强制结构化完整输出——zendesk-kg 默认 table 只有 metadata);`allowedSubcommands` 限定第一个参数;`maxOutputBytes` 防止大 JSON 被截断成非法(默认 30000)。
-  - `--tools` 去掉所有内置工具(bash/eval/read/write/edit/...);`--config` overlay 关掉发现源 MCP(如任意代码执行的 `node_repl`);一个 fail-closed 的 `tool_call` hook 硬拦截白名单外的**一切**工具调用。
-  - `extraToolAllowlist`:额外允许的内置工具名(如 `read`)。默认空。
-  - `feishuHostTools`:是否给访客开放飞书 host tools(主动发/读消息)。默认 `false`。
-  - `systemPrompt`:**仅对访客**生效的提示词,会**前置到访客 prompt** 给沙箱 agent 设定角色/用途;信任用户不受影响。空/未设 = 不前置。(不用 `--append-system-prompt`——给 codex 模型追加系统块会偶发卡死无回复。)
-- `unrestrictedUsers` 未设置时回退到 `access.admins`。
-- 范围:**群/话题里一律沙箱**(连 operator 也是——群是共享空间,bot 始终是受限助手);**私聊**按发送者信任(operator 全权、其他人沙箱)。fail-closed:senderId 缺失按访客处理。要全权请私聊 bot。
-- ⚠️ 改 `guestPolicy` 后需**整进程重启** `restart`(`/reconnect` 不会重建 OMP adapter)。
-- 生成的沙箱产物在 `~/.feishu-omp-bridge/guest/`(overlay + 白名单 hook,自动维护)。
-- 本地回归验证:`pnpm test:guest`(加 `--model` 跑真实模型越权测试)。
-
-### 统一策略（`policy`，进阶）
-
-`access` / `guestPolicy` / `relay.route` 覆盖常见场景。需要**按场景 × 身份**精细映射工具模式时，用顶层 `policy` 块——三条正交命名轴：
+按**场景 × 身份**精细映射工具模式，用顶层 `policy` 块——三条正交命名轴：
 
 - **`principals`**：命名身份组（open_id）。未列入者 = 隐式 `guest`。每个组可带 `run: front|worker`（在哪端跑；`guest` 恒 front）。
 - **`profiles`**：命名工具模式。内置 `full`（全开）与 `locked`（零工具）恒存在。`tools: 'all'` = 全开；`tools: [...]` = 受限沙箱（钉死内置工具，关发现源/共享记忆，加 fail-closed hook）。可带 `commandTools` / `feishuHostTools` / `maxToolCalls` / `systemPrompt` / `discovery` / `memory` / `extensions`（你自己的 `.mjs` hook 文件路径，做更复杂的工具/调用次数限制，与自动 hook 叠加）。
@@ -369,9 +321,9 @@ node bin/feishu-omp-bridge.mjs secrets get                      # exec-provider 
 }
 ```
 
-- **缺省 = 向后兼容**：未设 `policy` 时按旧 `access`/`guestPolicy`/`relay.route` 自动合成等价策略，行为不变。
+- **缺省 = 内置开放默认**：未设 `policy` 时走内置 `DEFAULT_OPEN_POLICY`（人人 `full`、不中继），不再合成旧字段——`guestPolicy`/`relay.route` 已被删除，写了会在启动/`restart` 时直接报错。
 - **显式 = fail-closed**：设了 `policy` 后，未命中任何 rule 或指向未知 profile 的发送者跑 `locked`（零工具），不回落全集——务必写一条兜底 rule。
-- 群批次多发送者时**最严者胜**；策略同时作用于消息、卡片回调与云文档评论。
+- 群批次多发送者时**最严者胜**；策略同时作用于消息与卡片回调。
 - 配置文件可用 **JSON 或 YAML**（`config.json` / `config.yaml` / `config.yml`，按此顺序取首个存在者）。
 - ⚠️ 改 `policy` 后需**整进程重启** `restart`。
 - 📖 完整配方（front/worker 分流、群聊 vs 私聊、自定义 `.mjs` hook 等）见 [**配置指南 CONFIGURATION.zh.md**](./CONFIGURATION.zh.md)。
@@ -406,7 +358,7 @@ flowchart LR
 ```
 
 - `listen` 可省略,默认 `127.0.0.1:8787`。建议用 TLS 反代(nginx/caddy)对外暴露;直接暴露也行,HMAC 握手是访问闸门。
-- 中继名单沿用现有信任配置:`relay.route.users` 显式指定 → 否则非空的 `guestPolicy.unrestrictedUsers` → 否则非空的 `access.admins`。**全空 = 谁都不中继**(fail-safe:绝不会把陌生人转到你的笔记本)。
+- 中继名单按人配置:在 `policy.principals` 里把某个组标 `run: "worker"`（如 `"owner": { "users": ["ou_我"], "run": "worker" }`），该组的消息/卡片操作就会中继到 worker；`guest`（未列入任何组的人）恒 `front`。**没配 `policy` 或没人设 `run: "worker"` = 谁都不中继**(fail-safe:绝不会把陌生人转到你的笔记本)。
 
 ### worker 配置(笔记本)
 
@@ -437,9 +389,9 @@ flowchart LR
 
 ### 路由与边界
 
-- 路由纯按**发送者/操作者信任**判定:信任用户的消息、卡片点击、文档评论都中继到 worker;非信任者一律留在 front。
+- 路由纯按**发送者/操作者信任**判定:信任用户的消息、卡片点击都中继到 worker;非信任者一律留在 front。
 - 私聊场景(你私聊 bot)完全正确。已知边界:群里非信任成员点击信任用户那条 worker 渲染卡片的按钮,会落到 front 而非 worker(罕见、非安全问题)。
-- `relay` 与 `preferences`、未来的顶层段一样,会在 `/account` 切换和首次密钥迁移时被保留,不会丢失。
+- `relay` 与 `preferences`、未来的顶层段一样,会在 CLI 换凭据（`secrets set` + `service restart`）和首次密钥迁移时被保留,不会丢失。
 
 ## 数据目录
 
@@ -449,7 +401,7 @@ flowchart LR
 | `~/.feishu-omp-bridge/secrets.enc` | 本地加密 secret keystore。 |
 | `~/.feishu-omp-bridge/.keystore.salt` | keystore salt。 |
 | `~/.feishu-omp-bridge/secrets-getter` | exec secret provider wrapper。 |
-| `~/.feishu-omp-bridge/sessions.json` | 每个 chat/topic 的 OMP session id、cwd、timeout 覆盖。 |
+| `~/.feishu-omp-bridge/sessions.json` | 每个 (chat/topic, profile) 的 OMP session id、cwd、更新时间。 |
 | `~/.feishu-omp-bridge/omp-sessions/` | bridge 专用 OMP JSONL session 文件。 |
 | `~/.feishu-omp-bridge/guest/` | 访客沙箱产物（OMP overlay + 工具白名单 hook，自动生成）。 |
 | `~/.feishu-omp-bridge/workspaces.json` | 命名工作空间。 |
@@ -465,7 +417,6 @@ flowchart LR
 | `/new chat [name]` | 创建新群并拉你进去，继承当前 cwd。需要 bot 具备 `im:chat` 权限。 | |
 | `/status` | 查看当前 scope、cwd、session、agent。 | |
 | `/stop` | 终止当前正在执行的 OMP run。 | |
-| `/timeout [N\|off\|default]` | 设置当前 session 的 idle timeout，或关闭 / 恢复全局默认。 | |
 | `/ps` | 列出本机所有 bridge 进程，并标识当前回复进程。 | |
 | `/help` | 显示帮助卡片。 | |
 | `/cd <path>` | 切换当前 chat/topic 的工作目录；会重置 session。支持 `~/xxx`。 | 🔒 |
@@ -475,7 +426,6 @@ flowchart LR
 | `/ws remove\|rm <name>` | 删除命名工作空间。 | 🔒 |
 | `/config` | 打开偏好设置卡片。 | 🔒 |
 | `/switch` | 弹卡片切换 OMP 模型：下拉列常用（role）模型，或输入框直接输入任意模型名（OMP 模糊匹配）。当前模型来自 `omp config modelRoles`，✅ 标已认证。写入 preferences.ompModel，立即生效，全局。 | 🔒 |
-| `/account`、`/account change` | 裸 `/account` 查看当前应用；`/account change` 更换 appId / secret 并重连。 | 🔒 |
 | `/exit <id\|#>` | 关闭指定 bridge 进程。 | 🔒 |
 | `/reconnect` | 热重连飞书长连接（不重建 OMP adapter）。 | 🔒 |
 | `/doctor [描述]` | 把最近日志和故障描述交给 OMP 自助诊断；群 / 话题里结果私信发给操作者。 | 🔒 |
@@ -568,7 +518,7 @@ feishu://message/<message_id>
   - `preferences.access.allowedChats`
   - `preferences.access.admins`
   - `ompTools` 工具白名单（全局，对所有人生效）
-  - `policy` 统一访问策略（principals/profiles/rules；推荐）或旧 `preferences.guestPolicy` 访客沙箱，见 [配置指南](./CONFIGURATION.zh.md)
+  - `policy` 统一访问策略（principals/profiles/rules），见 [配置指南](./CONFIGURATION.zh.md)
   - 固定工作目录 / 命名工作空间
 - 群聊默认必须 `@bot` 才响应，避免无意触发。
 - `@全员` 不会触发响应。
@@ -640,7 +590,7 @@ pnpm build
 | OMP RPC 启动后无响应 | 单独运行 `omp --mode rpc` 做 smoke test；检查 `~/.feishu-omp-bridge/logs/`。 |
 | OMP 没有续上次对话 | 发 `/status` 查看 cwd 和 session；cwd 变化会自动新建 session。 |
 | 群聊无响应 | 确认消息里 `@bot`，或在 `/config` / `config.json` 中调整 `requireMentionInGroup`。 |
-| 卡片长时间不动 | 用 `/stop` 中断；也可设置 `/timeout 10` 开启当前 session idle 探活。 |
+| 卡片长时间不动 | 用 `/stop` 中断；也可在 `config.json` 设置全局 `preferences.runIdleTimeoutMinutes` 开启 idle 探活（改后需 `restart`）。 |
 | OMP 等待选择 / 输入 | 回复单独出现的“OMP 交互”卡片；等待期间 idle watchdog 会暂停。 |
 | 飞书 API 工具不可用 | 按启动提示安装并绑定 `lark-cli`；或者优先使用已注册的 Feishu host tools。 |
 | `/new chat` 失败 | 确认 bot 具备创建群相关权限，代码中该能力依赖 `im:chat`。 |

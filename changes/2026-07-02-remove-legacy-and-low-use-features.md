@@ -325,9 +325,9 @@ throw new Error('Windows 守护进程支持已移除；请前台运行 `feishu-o
 
 **Interfaces:** 无代码。核对方式：对每个被删符号 `grep -rn "<符号>" how-it-works CONFIGURATION.zh.md README*.md`，命中即改。
 
-- [ ] **Step 1:** 逐文件按上述清单改写；mermaid 图中出现被删元素（comment 路由、text 分支、/timeout）的一并更新。
-- [ ] **Step 2:** 用 scratchpad 里的 `check-mermaid.mjs` + `check-links.js` 校验全部图与链接。
-- [ ] **Step 3:** `git commit -m "docs: sync docs after legacy/low-use feature removal"`
+- [x] **Step 1:** 逐文件按上述清单改写；mermaid 图中出现被删元素（comment 路由、text 分支、/timeout）的一并更新。
+- [x] **Step 2:** 用 scratchpad 里的 `check-mermaid.mjs` + `check-links.js` 校验全部图与链接。
+- [x] **Step 3:** `git commit -m "docs: sync docs after legacy/low-use feature removal"`
 
 ---
 

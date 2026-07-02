@@ -1,10 +1,10 @@
 # 03 · 飞书传输层
 
-> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `103dd04`（文档对应的源码 commit；详见 [README](./README.md)）。
 
-> 覆盖范围：`LarkChannel` 构造与 SDK 旋钮、四类 SDK 事件注册 + WS 生命周期、`NormalizedMessage` 形状、keepalive 看门狗、网络/代理、chat 模式缓存、扫码向导、凭据校验、引用消息、交互卡片展开、建群、reaction、云文档评论，以及可选的 relay 中继（front/worker）。逐项标注“飞书专属 vs 可复用”。
+> 覆盖范围：`LarkChannel` 构造与 SDK 旋钮、三类 SDK 事件注册 + WS 生命周期、`NormalizedMessage` 形状、keepalive 看门狗、网络/代理、chat 模式缓存、扫码向导、引用消息、交互卡片展开、建群、reaction，以及可选的 relay 中继（front/worker）。逐项标注"飞书专属 vs 可复用"。云文档评论管线（曾经的第四类事件 + `comments.ts`）已整体移除，@bot 评论不再触发任何响应。
 >
-> 源文件：`src/bot/channel.ts`（`buildChannelOptions`/`createBridgeRuntime`/`startChannel`/`startWorker`/`startBridge`）、`src/bot/keepalive.ts`、`src/bot/network-config.ts`、`src/bot/chat-mode-cache.ts`、`src/bot/scope.ts`、`src/bot/wizard.ts`、`src/utils/feishu-auth.ts`、`src/bot/quote.ts`、`src/bot/interactive-card.ts`、`src/bot/group.ts`、`src/bot/reaction.ts`、`src/bot/comments.ts`、`src/relay/{protocol,front,route,worker}.ts`、`src/config/schema.ts`（`RelayConfig`/`PrincipalConfig.relayScenarios`）、`src/config/policy.ts`（`relayRunTarget`/`scenarioMatches`）。
+> 源文件：`src/bot/channel.ts`（`buildChannelOptions`/`createBridgeRuntime`/`startChannel`/`startWorker`/`startBridge`）、`src/bot/keepalive.ts`、`src/bot/network-config.ts`、`src/bot/chat-mode-cache.ts`、`src/bot/scope.ts`、`src/bot/wizard.ts`、`src/bot/quote.ts`、`src/bot/interactive-card.ts`、`src/bot/group.ts`、`src/bot/reaction.ts`、`src/relay/{protocol,front,route,worker}.ts`、`src/config/schema.ts`（`RelayConfig`/`PrincipalConfig.relayScenarios`）、`src/config/policy.ts`（`relayRunTarget`/`scenarioMatches`）。
 
 相关篇：[消息管线](./04-message-pipeline.md)（事件如何流入 runtime）、[流式与卡片](./05-streaming-and-cards.md)、[配置与密钥](./08-config-and-secrets.md)。
 
@@ -13,7 +13,7 @@
 `startChannel` 调 `createLarkChannel(buildChannelOptions(cfg, appSecret, netOverrides))`。`buildChannelOptions` 设定的关键项（`src/bot/channel.ts`）：
 
 - `appId` / `appSecret`（已解析为明文，见 [08](./08-config-and-secrets.md)）/ `domain`：`tenant==='lark'` → `Domain.Lark` 否则 `Domain.Feishu`。
-- `source: 'feishu-omp-bridge'`、`loggerLevel: LoggerLevel.info`、`logger: buildQuietLogger()`（把 SDK 日志降噪并归入自己的结构化日志；对 `SUPPRESSED_API_ERROR_CODES`=`{131005,1069307,1069302}` 这几个“预期会失败”的码直接静音）。
+- `source: 'feishu-omp-bridge'`、`loggerLevel: LoggerLevel.info`、`logger: buildQuietLogger()`（把 SDK 日志降噪、归入自己的结构化日志；曾经对几个云文档评论相关的“预期会失败”错误码做静音过滤，随评论管线一起删除，`error` 现在是无过滤的一行转发）。
 - `policy: { dmMode:'open', requireMention:false, respondToMentionAll:false }`——SDK 层不强制 @bot（bridge 自己在 intake 做群提及门控），但 `@全员` 由 SDK 直接过滤掉。
 - `safety: { chatQueue: { enabled:false } }`——关掉 SDK 的 per-chat 串行化，改用 bridge 自己的 debounce + run-chain（见 [04](./04-message-pipeline.md)）。
 - `includeRawEvent: true`——把原始 webhook body 附在规范化事件上，供读取 normalizer 丢弃的字段（如 CardKit 2.0 表单的 `action.form_value`、交互卡片的 `user_dsl`）。
@@ -22,7 +22,7 @@
 - `handshakeTimeoutMs: 8000`——握手快失败快重试。
 - `agent`（可选）——仅当 `HTTPS_PROXY`/`HTTP_PROXY` 存在时由 `network-config.ts` 注入。
 
-## 2. 四类事件注册 + WS 生命周期
+## 2. 三类事件注册 + WS 生命周期
 
 `startChannel` 里 `channel.on({...})` 注册：
 
@@ -31,27 +31,24 @@ flowchart TD
   WS["channel.on(...)"] --> M{"事件类型"}
   M -->|message| RM{"router?.routeMessage(msg)"}
   M -->|cardAction| RC{"await router?.routeCardAction(evt)"}
-  M -->|comment| RK{"router?.routeComment(evt)"}
   M -->|reject| LOG["仅记日志"]
   RM -->|"true（已转发 worker）"| FWD["return（WS handler 快返回）"]
   RC -->|true| FWD
-  RK -->|true| FWD
   RM -->|false| DM["runtime.dispatchMessage"]
   RC -->|false| DC["runtime.dispatchCardAction"]
-  RK -->|false| DK["runtime.dispatchComment"]
 ```
 
 
 - `message`：先 `router?.routeMessage(msg)`（relay front 模式，run 目标为 worker **且场景匹配**的发送者转发给 worker 后立即返回——WS handler 必须快返回否则 Feishu 重投，worker 侧按事件 id 去重；门控详见 §11），否则 `runtime.dispatchMessage(msg)`。包在 `withTrace({chatId,msgId})` 里。
 - `cardAction`：同理，但 `routeCardAction` 是 **async**（卡片回调事件不带 chat 类型，需经 `ChatModeCache` 解析场景做 `relayScenarios` 匹配，见 §11），故分发处是 `await router?.routeCardAction(evt)`，否则 `runtime.dispatchCardAction`。
-- `comment`：`router?.routeComment` 否则 `runtime.dispatchComment`。
 - `reject`：仅记日志。
+- 曾经的第四类事件 `comment`（`router?.routeComment` / `runtime.dispatchComment`）已随云文档评论管线一起删除——`channel.on(...)` 不再注册 `comment` 回调，SDK 也就不再向 bridge 投递该事件。
 
 WS 生命周期回调：`reconnecting`（计数，3 次/10 次时往 stdout 升级告警）、`reconnected`（清零计数）、`error`（按 `ENOTFOUND/getaddrinfo`、`handshake`、`timeout` 分类到 `network` 阶段，便于 `/doctor` 检索）。`await channel.connect()` 后读 `channel.botIdentity` 记 `ws connected`。
 
 ## 3. `NormalizedMessage` 形状
 
-SDK 规范化后的消息（bridge 消费的字段）：`messageId`、`chatId`、`chatType`（`p2p`/`group`/…）、`threadId?`、`senderId`、`senderName?`、`content`、`rawContentType`（如 `text`/`post`/`interactive`/`card_action`）、`resources`（`ResourceDescriptor[]`，含 `fileKey`/`type`/`fileName`）、`mentions`、`mentionAll`、`mentionedBot`、`createTime`、`raw`（原始 body，因 `includeRawEvent`）、`replyToMessageId?`。`CardActionEvent` 含 `action.value`、`operator.openId/name`、`chatId`、`messageId`；`CommentEvent` 含 `fileToken`、`operator` 等。
+SDK 规范化后的消息（bridge 消费的字段）：`messageId`、`chatId`、`chatType`（`p2p`/`group`/…）、`threadId?`、`senderId`、`senderName?`、`content`、`rawContentType`（如 `text`/`post`/`interactive`/`card_action`）、`resources`（`ResourceDescriptor[]`，含 `fileKey`/`type`/`fileName`）、`mentions`、`mentionAll`、`mentionedBot`、`createTime`、`raw`（原始 body，因 `includeRawEvent`）、`replyToMessageId?`。`CardActionEvent` 含 `action.value`、`operator.openId/name`、`chatId`、`messageId`。
 
 ## 4. keepalive 看门狗（`src/bot/keepalive.ts`）
 
@@ -92,9 +89,9 @@ flowchart TD
 
 `scope.ts` 的 `scopeFor(chatId, threadId)` / `scopeForMessage(msg)` 是**同步纯函数**，也是 session scope 的唯一事实来源（intake 与卡片 dispatcher 共用）：消息带 `threadId` → `${chatId}:${threadId}`，否则 `chatId`。关键在**只看 thread_id、不看 chat_mode**：开启"话题"功能的普通群 chat_mode 仍是 `'group'`，但每条消息带稳定 `thread_id`（`omt_…`）；旧实现按 `chat_mode==='topic'` 门控，会把这种群的所有话题折叠进同一个 chatId scope（共享 session、单一 active run、跨话题回复错位）。现在话题群和开话题的普通群一视同仁：每个话题各自拥有 session / cwd / pending 队列 / active run。
 
-## 7. 扫码向导与凭据校验（`wizard.ts` / `utils/feishu-auth.ts`）
+## 7. 扫码向导（`wizard.ts`）
 
-`runRegistrationWizard()`：调 SDK `registerApp`，在终端用 `qrcode-terminal` 画二维码让用户扫码创建 PersonalAgent 应用；拿到 `client_id`/`client_secret`/`tenant_brand`/`open_id`。**把扫码者 open_id 自动写进 `preferences.access.admins`** 作为初始管理员（`allowedUsers`/`allowedChats` 留空 = 不限制）。`validateAppCredentials(appId, appSecret, tenant)`（`feishu-auth.ts`）：用凭据换 `tenant_access_token`，成功再尽力拉 bot 显示名（`/open-apis/bot/v3/info`）；供 `/account` 改凭据时校验。
+`runRegistrationWizard()`：调 SDK `registerApp`，在终端用 `qrcode-terminal` 画二维码让用户扫码创建 PersonalAgent 应用；拿到 `client_id`/`client_secret`/`tenant_brand`/`open_id`。**把扫码者 open_id 自动写进 `preferences.access.admins`** 作为初始管理员（`allowedUsers`/`allowedChats` 留空 = 不限制）。换凭据不再有聊天内 `/account` 流程（连同它调用的 `validateAppCredentials`/`src/utils/feishu-auth.ts` 一并删除）——现在只能走 CLI：重新跑注册向导，或 `secrets set` + `service restart`（见 [11](./11-daemon-cli-runtime.md)）。
 
 ## 8. 引用消息（`src/bot/quote.ts`）
 
@@ -110,11 +107,12 @@ flowchart TD
 
 三个分支都包进 `<interactive_card>` 块。`channel.ts` 的 `expandedMessageContent` 对直接收到的交互消息（`rawContentType==='interactive'`）调它，让直接收卡和引用收卡得到同样的注入。
 
-## 10. 建群、reaction、云文档评论
+## 10. 建群、reaction
 
 - `group.ts`：`createBoundChat({channel,name,inviteOpenId,description?})` 用 `im.v1.chat.create`（`chat_mode:'group'`、`chat_type:'private'`、`user_id_list`）建私有群并拉人，需 bot 具备 `im:chat`；`defaultChatName()` 生成 `OMP · M-D HH:MM`。供 `/new chat`（见 [10](./10-commands.md)）。
-- `reaction.ts`：通用 `addReaction(channel, messageId, emojiType = REACTION_WORKING)` / `removeReaction`——IM 消息上的表情 ack，失败只记日志绝不抛（丢一个装饰不能坏掉回复流）。两个导出常量：`REACTION_WORKING='Typing'`（敲键盘，“正在回复”，markdown/text 回复模式的即时 ack；card 模式初始卡片自带“正在思考…”footer 故不加）、`REACTION_DEFERRED='OneSecond'`（⏳，mid-run 消息因发送者 profile 与活跃 run 不同名被推迟时的“已收到、稍后答复”标记，见 [04](./04-message-pipeline.md)）。`addCommentReaction`/`removeCommentReaction`：云文档评论 reply 上的同等 Typing 表情，走 `drive/v2/.../comments/reaction` 内部端点（add/delete 是同一 POST 的 `action` 字段，不返回 reaction id）。
-- `comments.ts`：`handleCommentMention(deps)`——bot 在云文档评论里被 @ 时，`resolveTarget`（wiki 节点换底层 obj_token）→ `fetchCommentContext`（`fileComment.get`，失败回落 `findCommentViaList`）→ `buildCommentPrompt` → 跑 agent（直接用 `agent.run`，无流式 UI，结果 `stripMarkdown` 后 `postCommentReply`）。云文档是共享面，故先 `resolveBatchProfile(cfg, [evt.operator.openId], { chat: 'group' })` 按 **group 场景**解析评论者 profile，再 `sessions.resumeFor(synthChatId, cwd, profile.name)`（`synthChatId` 为 `doc:{fileToken}`，session 按 (scope, profile) 存取，`sessions.set` 也带 `profile.name`）——受限评论者不会 resume 同一文档上 `full` 层级的会话；评论无 Feishu host 集成，只暴露 profile 的 commandTools，profile 的 systemPrompt 前置进 prompt。仅支持 `SUPPORTED_FILE_TYPES={doc,docx,sheet,file}`，回复截断到 `REPLY_MAX_CHARS=2000`。云文档评论**无条件要求 @bot**。
+- `reaction.ts`：通用 `addReaction(channel, messageId, emojiType = REACTION_WORKING)` / `removeReaction`——IM 消息上的表情 ack，失败只记日志绝不抛（丢一个装饰不能坏掉回复流）。两个导出常量：`REACTION_WORKING='Typing'`（敲键盘，“正在回复”，markdown 回复模式的即时 ack；card 模式初始卡片自带“正在思考…”footer 故不加）、`REACTION_DEFERRED='OneSecond'`（⏳，mid-run 消息因发送者 profile 与活跃 run 不同名被推迟时的“已收到、稍后答复”标记，见 [04](./04-message-pipeline.md)）。
+
+云文档评论管线（`comments.ts` 的 `handleCommentMention`、`addCommentReaction`/`removeCommentReaction`）已整体删除——@bot 评论不再触发任何响应，`channel.on(...)` 也不再订阅 `comment` 事件（见 §2）。
 
 ## 11. relay 中继：front / worker 双进程（`src/relay/*`）
 
@@ -143,7 +141,7 @@ flowchart LR
 
 ### front / worker 两侧的装配
 
-- **`startChannel`（front/standalone）**：持有唯一的飞书 WS 长连接。`role==='front'` 时额外 `startRelayServer({appId, secret, listen})`——`listen` 默认 `127.0.0.1:8787`；`secret` 经 `resolveRelaySecret(cfg, appSecret)` 解析（设了 `relay.secret` 用它，否则回落 App Secret）——并建 `createRelayRouter({cfg, sink: relayServer, resolveScenario: (chatId) => runtime.chatModeCache.resolve(channel, chatId)})`：`resolveScenario` 直接复用 `BridgeRuntime` 暴露的 `chatModeCache`（见 §6），供卡片回调路由解析场景。把 **run 目标为 worker 且场景匹配**的发送者（`relayRunTarget(cfg, senderId, scenario)==='worker'`，见下）的 message/cardAction/comment 转发给在线 worker，其余在本地跑（`guest` 恒 front，访客始终留在 front、走 front 渲染的卡片）。
+- **`startChannel`（front/standalone）**：持有唯一的飞书 WS 长连接。`role==='front'` 时额外 `startRelayServer({appId, secret, listen})`——`listen` 默认 `127.0.0.1:8787`；`secret` 经 `resolveRelaySecret(cfg, appSecret)` 解析（设了 `relay.secret` 用它，否则回落 App Secret）——并建 `createRelayRouter({cfg, sink: relayServer, resolveScenario: (chatId) => runtime.chatModeCache.resolve(channel, chatId)})`：`resolveScenario` 直接复用 `BridgeRuntime` 暴露的 `chatModeCache`（见 §6），供卡片回调路由解析场景。把 **run 目标为 worker 且场景匹配**的发送者（`relayRunTarget(cfg, senderId, scenario)==='worker'`，见下）的 message/cardAction 转发给在线 worker，其余在本地跑（`guest` 恒 front，访客始终留在 front、走 front 渲染的卡片）。
 - **`startWorker`**：`transport:'webhook'` 让 SDK **不开 WS 长连接**（同一应用两个长连接会让投递随机），`connect()` 只做一次 REST 取 bot 身份（best-effort，失败仅降级引用消息的 bot 识别）。事件由 `startRelayWorker` 反向拨号 front 的 SSE 端点收来，按事件 id 去重后喂给同一套 `createBridgeRuntime`。`relay.endpoint` 若是明文 `http` 且非回环地址会打 `insecure-endpoint` 告警：握手 HMAC 只认证 worker，事件流本身未加密未认证，可被中间人读取/伪造（事件驱动本地 full-tool agent），应上 https。
 
 ### 路由（`route.ts`）：per-principal `relayScenarios` 门控
@@ -151,14 +149,15 @@ flowchart LR
 路由判据是 `relayRunTarget(cfg, senderId, scenario?)`（`src/config/policy.ts`），三步：
 
 1. 发送者所属 principal 的 `run !== 'worker'` → `'front'`（`guest` 恒 front，陌生人永不被 relay 到笔记本）。
-2. principal 设了显式 `relayScenarios`（`PrincipalConfig.relayScenarios?: PolicyScenario[]`，仅 `run==='worker'` 时有意义）且 `scenarioMatches(relayScenarios, scenario)` 不成立 → `'front'`。`scenarioMatches` 的规则：`'group'` 允许项**亦覆盖** `'topic'`；`scenario === undefined`（未知场景，如云文档评论）**永不满足**显式限制。`normalizeScenarios` 过滤非法项并去重——显式给了数组但过滤后为空是 `[]`（什么都不 relay），与字段缺省（`undefined` = 不限制、全部 relay）是两回事。
+2. principal 设了显式 `relayScenarios`（`PrincipalConfig.relayScenarios?: PolicyScenario[]`，仅 `run==='worker'` 时有意义）且 `scenarioMatches(relayScenarios, scenario)` 不成立 → `'front'`。`scenarioMatches` 的规则：`'group'` 允许项**亦覆盖** `'topic'`；`scenario === undefined`（未知场景）**永不满足**显式限制——`RelayKind` 现只剩 `message`/`cardAction` 两种（云文档评论管线已删除，曾经恒传 `undefined` scenario 的 `routeComment` 一并没了），两者在生产环境下都能解析出具体场景，这条分支目前是防御性兜底。`normalizeScenarios` 过滤非法项并去重——显式给了数组但过滤后为空是 `[]`（什么都不 relay），与字段缺省（`undefined` = 不限制、全部 relay）是两回事。
 3. 否则 `'worker'`。典型用法：`relayScenarios: ['p2p']` 只把该 principal 的私聊送到 worker（个人笔记本），群聊/话题留在常驻 front。
 
-三个 `route*` 各自怎么拿 scenario：
+两个 `route*` 各自怎么拿 scenario：
 
 - `routeMessage(msg)`（同步）：`msg.chatType === 'p2p' ? 'p2p' : 'group'`。消息路径**不产出** `'topic'`（话题群消息的 `chatType` 也是 `group`）——要让话题群 relay，写 `'group'` 允许项即可（它覆盖 topic）。
 - `routeCardAction(evt)`（**async**）：卡片回调事件不带 chat 类型，经 `opts.resolveScenario?.(evt.chatId)` 解析——由 bridge 的 `ChatModeCache` 支撑（多数命中缓存，每 chat 至多一次 `chat.get`），这条路径**能**解析出 `'topic'`。front 分发处相应 `await router?.routeCardAction(evt)`。卡片回调经同一门控，保证回调落在渲染卡片的那一侧；未传 `resolveScenario`（测试等场景）时 scenario 为 `undefined`，带显式限制的 principal 的卡片回调留在 front。
-- `routeComment(evt)`：scenario 传 `undefined`——principal 有显式 `relayScenarios` 限制时，云文档评论一律留在 front。
+
+曾经的第三个 `route*`——`routeComment(evt)`（scenario 恒传 `undefined`）——已随云文档评论管线整体删除，`RelayKind` 现只剩 `'message' | 'cardAction'`。
 
 每个 `route*` 返回 `true` = 已转发（front 跳过本地处理）、`false` = 本地跑。转发非阻塞、绝不 await worker 的运行：`dispatch` 先查 `sink.hasWorker()`（没 worker 在线 → `false` → 回落本地跑），再包 `RelayEvent { v, id: naturalId(kind,payload), kind, ts, payload }` 交 `sink.forward`。`RelaySink { hasWorker(); forward(event) }` 由 front 的 server 实现：`forward` 取**最近连上的** worker（单 worker 是常态）；`res.write` 因背压返回 false 时帧仍在队列里，按“已接收”处理——避免 front 又本地跑一遍、孵化重复 run。
 
@@ -167,10 +166,8 @@ flowchart TD
   EV["入站事件"] --> KIND{"事件类型"}
   KIND -->|message| SM["scenario = chatType=='p2p' ? 'p2p' : 'group'"]
   KIND -->|cardAction| SC["scenario = await resolveScenario(chatId)<br/>（ChatModeCache，可解析出 'topic'）"]
-  KIND -->|comment| SU["scenario = undefined"]
   SM --> P["principalOf(policy, senderId)"]
   SC --> P
-  SU --> P
   P --> RUNQ{"principal.run == 'worker'?"}
   RUNQ -->|"否（guest 恒 front）"| FRONTQ["front 本地跑"]
   RUNQ -->|是| SCEN{"有显式 relayScenarios?"}
@@ -211,7 +208,7 @@ sequenceDiagram
 | 模块 | 性质 |
 | --- | --- |
 | `channel.ts` 的 SDK 旋钮、事件注册、WS 生命周期 | **飞书专属**（绑定 `@larksuiteoapi/node-sdk`） |
-| `keepalive.ts`、`network-config.ts`、`chat-mode-cache.ts`、`scope.ts`、`wizard.ts`、`feishu-auth.ts`、`quote.ts`、`interactive-card.ts`、`group.ts`、`reaction.ts`、`comments.ts` | **飞书专属但与 agent 后端无关**——换后端（如 Dify）可整体复用 |
+| `keepalive.ts`、`network-config.ts`、`chat-mode-cache.ts`、`scope.ts`、`wizard.ts`、`quote.ts`、`interactive-card.ts`、`group.ts`、`reaction.ts` | **飞书专属但与 agent 后端无关**——换后端（如 Dify）可整体复用 |
 | `relay/*`（front/route/worker） | 飞书侧传输，可整体复用；仅 `protocol.ts` 的 `KEY_LABEL` 带包名标识，换包名时一并改 |
 | `RelayConfig` 等 schema | 配置层，复用 |
 

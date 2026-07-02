@@ -1,6 +1,6 @@
 # 06 · 飞书 host 工具面
 
-> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `103dd04`（文档对应的源码 commit；详见 [README](./README.md)）。
 
 > 覆盖范围：`createFeishuHostIntegration` 暴露的 4 个 host tool（`feishu_current_context`/`feishu_send_message`/`feishu_reply_message`/`feishu_get_message`）及只读 `feishu://` scheme（`feishu://current/context`、`feishu://message/<id>`）；它们如何按 run 注册、如何在 OMP RPC 循环里被执行。
 >

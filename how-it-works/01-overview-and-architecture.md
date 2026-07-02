@@ -1,6 +1,6 @@
 # 01 · 总览与架构
 
-> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `103dd04`（文档对应的源码 commit；详见 [README](./README.md)）。
 
 > 覆盖范围：四层架构、`AgentAdapter` 这条“缝”及其存在理由、从 `bin/feishu-omp-bridge.mjs` 到 `runStart` 的完整启动序列、运行时数据目录映射。
 >
@@ -18,16 +18,16 @@ flowchart TD
   O["② 编排层 orchestration<br/>channel.ts · intake / scope 解析 / policy 解析<br/>去抖 / mid-run 注入门控 / 并发 / 回写"]
   A["③ Agent 适配器层<br/>AgentAdapter / AgentRun / AgentEvent 契约"]
   P["④ 呈现层 presentation<br/>card/ · reduce → CardKit 2.0<br/>(badge · 工具折叠 · 终结标记)"]
-  T -->|"NormalizedMessage / CardActionEvent / CommentEvent"| O
+  T -->|"NormalizedMessage / CardActionEvent"| O
   O -->|"agent.run(opts) · profile 决定工具面"| A
   A -->|"AgentEvent 流"| P
   P -.->|"渲染卡片回写 (stream / managed card)"| O
 ```
 
-1. **传输层（transport）**：`@larksuiteoapi/node-sdk` 的 `LarkChannel` 负责 WebSocket 长连接、OpenAPI REST、把 Feishu 原始事件规范化成 `NormalizedMessage` / `CardActionEvent` / `CommentEvent`。bridge 自己只在这层之上注册回调。详见 [03](./03-feishu-transport.md)。
+1. **传输层（transport）**：`@larksuiteoapi/node-sdk` 的 `LarkChannel` 负责 WebSocket 长连接、OpenAPI REST、把 Feishu 原始事件规范化成 `NormalizedMessage` / `CardActionEvent`。bridge 自己只在这层之上注册回调。详见 [03](./03-feishu-transport.md)。
 2. **编排层（orchestration）**：`src/bot/channel.ts` 的 `createBridgeRuntime` 把规范化事件接入 intake → 去抖（`PendingQueue`）→ 并发受限的 run（`ProcessPool`）→ 流式回写。命令、访问控制、@提及门控、scope 解析（`scopeForMessage`，thread_id 优先——见 `src/bot/scope.ts`）、统一策略解析（`resolveBatchProfile`）、mid-run 注入门控（`injectionDecision` + ⏳ 缓期）、卡片回调都在这层。详见 [04](./04-message-pipeline.md)、[09](./09-access-and-guest-sandbox.md)、[10](./10-commands.md)。
 3. **Agent 适配器层（agent-adapter）**：`src/agent/types.ts` 定义 `AgentAdapter` / `AgentRun` / `AgentEvent` 契约，`src/agent/omp/` 提供唯一实现 `OmpAdapter`。详见 [02](./02-agent-adapter-and-omp.md)。
-4. **呈现层（presentation）**：`src/card/` 把 `AgentEvent` 流 reduce 成 `RunState` 再渲染成 CardKit 2.0 卡片 / markdown / 纯文本。详见 [05](./05-streaming-and-cards.md)。
+4. **呈现层（presentation）**：`src/card/` 把 `AgentEvent` 流 reduce 成 `RunState` 再渲染成 CardKit 2.0 卡片 / markdown。详见 [05](./05-streaming-and-cards.md)。
 
 ## 2. `AgentAdapter` 这条缝，以及它为何存在
 
@@ -122,7 +122,7 @@ sequenceDiagram
 | `~/.feishu-omp-bridge/secrets.enc` | `secretsFile` | 本地 AES-256-GCM 加密 keystore。 |
 | `~/.feishu-omp-bridge/.keystore.salt` | `keystoreSaltFile` | keystore 派生盐（非密钥）。 |
 | `~/.feishu-omp-bridge/secrets-getter` | `secretsGetterScript` | exec secret provider 包装脚本。 |
-| `~/.feishu-omp-bridge/sessions.json` | `sessionsFile` | 每 scope 按 **profile 名嵌套**的可恢复会话（`sessions: Record<profileName, {sessionId, cwd, updatedAt}>`）+ scope 级 idle-timeout 覆盖。 |
+| `~/.feishu-omp-bridge/sessions.json` | `sessionsFile` | 每 scope 按 **profile 名嵌套**的可恢复会话（`sessions: Record<profileName, {sessionId, cwd, updatedAt}>`）。 |
 | `~/.feishu-omp-bridge/omp-sessions/` | `ompSessionsDir` | bridge 专用 OMP JSONL session 文件。 |
 | `~/.feishu-omp-bridge/guest/` | `guestDir` | 受限 profile 的沙箱产物（`overlay.yml` + `allowlist-hook.mjs`），按 profile 内容签名分子目录。 |
 | `~/.feishu-omp-bridge/workspaces.json` | `workspacesFile` | 命名工作空间 + 每 scope cwd。 |
@@ -130,7 +130,7 @@ sequenceDiagram
 | `~/.feishu-omp-bridge/media/` | `mediaDir` | 下载的图片 / 文件缓存。 |
 | `~/.feishu-omp-bridge/logs/` | （`logger.ts` 内 `logsDir()` + `daemon/paths.ts` 的 `daemonLogDir()`） | 结构化日志 + daemon stdout/stderr。 |
 
-`paths.cacheDir` 当前等于 `appDir`。另有 `legacyPaths`（`~/.config/feishu-codex-bridge`、`~/.cache/feishu-codex-bridge`），供 `src/cli/commands/migrate.ts` 的一次性迁移引用（见 [11](./11-daemon-cli-runtime.md)）。
+`paths.cacheDir` 当前等于 `appDir`。旧的一次性迁移器（`cli/commands/migrate.ts`）与它引用的 `legacyPaths`（`~/.config/feishu-codex-bridge`、`~/.cache/feishu-codex-bridge`）已整体删除——见 [11](./11-daemon-cli-runtime.md)。
 
 `sessions.json` 的结构（`src/session/store.ts`）——顶层键是 scope（`chatId` 或 `${chatId}:${threadId}`，由 `src/bot/scope.ts` 的 `scopeFor` 决定，thread_id 优先），值为嵌套的 `ScopeEntry`：
 
@@ -138,7 +138,6 @@ sequenceDiagram
 classDiagram
   class ScopeEntry {
     +sessions : profileName → ProfileSession 映射
-    +idleTimeoutMinutes? : number（scope 级覆盖）
     +updatedAt : number
   }
   class ProfileSession {
@@ -149,7 +148,7 @@ classDiagram
   ScopeEntry "1" --> "0..*" ProfileSession : 按 profile 名嵌套
 ```
 
-session 按 `(scope, profile)` 存取：`resumeFor(scope, cwd, profile)` 在 profile 或 cwd 任一不匹配时返回 undefined（= fresh 开始），这样低权 profile 永远不会 resume 到 `full` 档位的会话线程；`latestSession(scope)` 跨 profile 取最近更新者供 `/status`；`clear(scope)` 清整个 scope（`/new`、`/cd`、`/ws` 用），`clearProfile(scope, profile)` 只清一个档位（resume 自愈用，保留兄弟 profile 会话与 idle 覆盖）。旧扁平结构（`{sessionId, cwd, updatedAt, idleTimeoutMinutes?}`）由 `migrateEntry` 容忍：扁平 session 因创建 profile 未知被**丢弃**（fail-safe，防止在错误 profile 下 resume 泄露上下文），仅保留裸 `idleTimeoutMinutes` 覆盖。详见 [07](./07-sessions-workspaces-media.md)。
+session 按 `(scope, profile)` 存取：`resumeFor(scope, cwd, profile)` 在 profile 或 cwd 任一不匹配时返回 undefined（= fresh 开始），这样低权 profile 永远不会 resume 到 `full` 档位的会话线程；`latestSession(scope)` 跨 profile 取最近更新者供 `/status`；`clear(scope)` 清整个 scope（`/new`、`/cd`、`/ws` 用），`clearProfile(scope, profile)` 只清一个档位（resume 自愈用，保留兄弟 profile 会话）。旧扁平结构（`{sessionId, cwd, updatedAt}`）由 `migrateEntry` 容忍但整条**丢弃**：创建它的 profile 未知，fail-safe 宁可让下一条消息新起会话，也不在错误 profile 下 resume 泄露上下文。详见 [07](./07-sessions-workspaces-media.md)。
 
 ## 5. 构建与运行约定
 

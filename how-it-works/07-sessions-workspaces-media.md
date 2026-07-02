@@ -1,12 +1,12 @@
 # 07 · 会话 / 工作空间 / 媒体
 
-> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `103dd04`（文档对应的源码 commit；详见 [README](./README.md)）。
 
-> 覆盖范围：`session/store.ts`（`ScopeEntry`/`ProfileSession`、`sessions.json`、scope 键、`migrateEntry` 旧结构迁移、`resumeFor` 的 scope→profile→cwd 三重匹配、`latestSession`、`clear` vs `clearProfile`、idle-timeout 覆盖与 clamp、串行持久化）；`workspace/store.ts`（`workspaces.json` 的 chats/named、每 scope cwd + 命名别名）；`media/cache.ts`（磁盘布局、文件名清洗、`AttachmentKind`、sticker 跳过、stat 缓存命中、下载、`gcMediaCache`）。
+> 覆盖范围：`session/store.ts`（`ScopeEntry`/`ProfileSession`、`sessions.json`、scope 键、`migrateEntry` 旧结构迁移、`resumeFor` 的 scope→profile→cwd 三重匹配、`latestSession`、`clear` vs `clearProfile`、串行持久化）；`workspace/store.ts`（`workspaces.json` 的 chats/named、每 scope cwd + 命名别名）；`media/cache.ts`（磁盘布局、文件名清洗、`AttachmentKind`、sticker 跳过、stat 缓存命中、下载、`gcMediaCache`）。
 >
 > 源文件：`src/session/store.ts`、`src/workspace/store.ts`、`src/media/cache.ts`、`src/config/paths.ts`。
 
-相关篇：[消息管线](./04-message-pipeline.md)（谁调用这些 store、resume-miss 自愈）、[访问控制](./09-access-and-guest-sandbox.md)（profile 是什么）、[聊天命令](./10-commands.md)（`/new`/`/cd`/`/ws`/`/timeout`/`/status`）。
+相关篇：[消息管线](./04-message-pipeline.md)（谁调用这些 store、resume-miss 自愈）、[访问控制](./09-access-and-guest-sandbox.md)（profile 是什么）、[聊天命令](./10-commands.md)（`/new`/`/cd`/`/ws`/`/status`）。
 
 ## 1. `SessionStore`（`src/session/store.ts`）
 
@@ -17,14 +17,13 @@ interface ProfileSession { sessionId: string; cwd: string; updatedAt: number }
 
 interface ScopeEntry {
   sessions: Record<string /* profileName */, ProfileSession>;
-  idleTimeoutMinutes?: number; // per-scope 覆盖；0 = 该 scope 显式关闭，undefined = 跟随全局
   updatedAt: number;
 }
 ```
 
 - `ProfileSession.cwd`：session 创建时的 cwd 钉在条目里——OMP 只能在创建 session 的 cwd 里 resume。
 - session 按 profile 分层的原因（`channel.ts` 注释同款）：同一群里低权限 run 绝不 resume（并继承其上下文的）高权限 profile 创建的 session，每个 tier 各有自己的对话线程。这是权限边界的"后半段"——前半段是 profile 本身的工具限制（见 [09](./09-access-and-guest-sandbox.md)）。
-- `idleTimeoutMinutes` 是 **scope 级**（不 per-profile）：`/new` 用 `clear` 连它一起抹掉，回落"跟随全局"。
+- 曾经有一个 **per-scope 的 `/timeout` idle 探活覆盖**（`idleTimeoutMinutes` 字段 + `ScopeEntry` 上的 clamp `[0,120]`），已随 `/timeout` 命令一起删除（见 [10](./10-commands.md)）——现在只有 `preferences.runIdleTimeoutMinutes` 这一个**全局**的 idle-kill 旋钮（见 [08](./08-config-and-secrets.md) 的 `getRunIdleTimeoutMs`），不再支持逐 scope 覆盖。
 
 `sessions.json` 实例（一个普通群 scope 下 `full`/`guest` 两个 tier 各自的线程 + 一个话题 scope）：
 
@@ -35,7 +34,6 @@ interface ScopeEntry {
       "full":  { "sessionId": "ses_01aaa", "cwd": "/Users/me/repos/proj", "updatedAt": 1751400000000 },
       "guest": { "sessionId": "ses_01bbb", "cwd": "/Users/me/repos/proj", "updatedAt": 1751400060000 }
     },
-    "idleTimeoutMinutes": 30,
     "updatedAt": 1751400060000
   },
   "oc_abc123:omt_deadbeef": {
@@ -50,7 +48,7 @@ interface ScopeEntry {
 方法：
 
 - `load()`：读 JSON，逐条过 `migrateEntry` 归一化；归一化失败（返回 undefined）的条目整条丢弃。
-- `migrateEntry(value)`：把持久化条目归一成当前嵌套形。`updatedAt` 非数字 → 整条丢；嵌套 `sessions` 里 `sessionId`/`cwd` 任一不是字符串的 profile 项跳过（profile 级 `updatedAt` 缺失时回落条目级）。**容忍旧扁平结构** `{sessionId?, cwd?, updatedAt, idleTimeoutMinutes?}`：扁平 session **直接丢弃**——创建它的 profile 未知，猜一个 profile 挂上去就可能把旧上下文 resume 给不该看的层级，fail-safe 宁可让下一条消息新起会话；只有裸 `idleTimeoutMinutes` 覆盖被保留。既无 session 又无覆盖 → 返回 undefined（没有值得留的东西）。
+- `migrateEntry(value)`：把持久化条目归一成当前嵌套形。`updatedAt` 非数字 → 整条丢；嵌套 `sessions` 里 `sessionId`/`cwd` 任一不是字符串的 profile 项跳过（profile 级 `updatedAt` 缺失时回落条目级）。**容忍旧扁平结构** `{sessionId?, cwd?, updatedAt}`（含更早版本可能带的裸 `idleTimeoutMinutes`，该字段现已不存在于 `ScopeEntry` 中，读到也直接忽略）：扁平 session **无条件丢弃**——创建它的 profile 未知，猜一个 profile 挂上去就可能把旧上下文 resume 给不该看的层级，fail-safe 宁可让下一条消息新起会话。归一化后 `sessions` 为空对象 → 整条返回 `undefined`（没有值得留的东西）。
 
 ```mermaid
 flowchart TD
@@ -58,19 +56,18 @@ flowchart TD
   UA -->|否| DROP["整条丢弃 (undefined)"]
   UA -->|是| NEST{"有嵌套 sessions 对象?"}
   NEST -->|是| KEEP["逐 profile 保留<br/>sessionId/cwd 均为字符串的项"]
-  NEST -->|"否 (旧扁平结构)"| FLAT["扁平 session 丢弃<br/>(创建 profile 未知, fail-safe 防上下文泄露)"]
-  KEEP --> ANY{"有 session 或 idleTimeoutMinutes?"}
-  FLAT --> ANY
+  NEST -->|"否 (旧扁平结构)"| FLAT["整条丢弃<br/>(创建 profile 未知, fail-safe 防上下文泄露)"]
+  KEEP --> ANY{"sessions 非空?"}
+  FLAT --> DROP
   ANY -->|否| DROP
-  ANY -->|是| RET["ScopeEntry {sessions, idleTimeoutMinutes?, updatedAt}"]
+  ANY -->|是| RET["ScopeEntry {sessions, updatedAt}"]
 ```
 
 - `resumeFor(scope, cwd, profile)`：**scope → profile → cwd 三重匹配**，任一 miss 即 `undefined`（= fresh，`channel.ts` 日志 `session fresh`；不再有旧版"stale-cleared"清条目的分支，miss 不写库）。cwd 变了即视为陈旧的理由不变：OMP 无法在不同 cwd 续 session。
 - `latestSession(scope)`：跨 profile 取 `updatedAt` 最新的一条，返回 `{sessionId, cwd, profile}`；scope 无可 resume 的 session 时 `undefined`。`/status` 用它展示"最近的会话"（`src/commands/index.ts` 的 `handleStatus`，`sessionStale` 由 `sess.cwd !== cwd` 判定）。
-- `set(scope, sessionId, cwd, profile)`：只覆写本 profile 的 `ProfileSession`（`updatedAt: now`），**保留兄弟 profile 的 session 与 scope 的 idle 覆盖**。
-- `clear(scope)`：删**整个 scope**——所有 profile 的 session + idle 覆盖一起没。`/new`、`/cd`、`/ws use` 用：语义是"这个聊天从头来"，每个 tier 的线程都该清。
-- `clearProfile(scope, profile)`：只删**一个 profile** 的 session，兄弟 profile 与 idle 覆盖保留（条目 `updatedAt` 刷新）。resume-miss 自愈专用：`channel.ts` 的 `driveAgent` 发现 `--resume` 的 session 已被 OMP 清掉（`isSessionMissingError`）时清本 tier、同一张卡片里 fresh 重试一次，不连坐其它 tier（见 [04](./04-message-pipeline.md)）。
-- `getIdleTimeoutMinutes(scope)` / `setIdleTimeoutMinutes(scope, minutes)`（`clamp [0,120]`，`Math.floor`；已有 sessions 原样保留）/ `clearIdleTimeoutOverride(scope)`（只删覆盖回落全局，session 保留，返回是否删过）。
+- `set(scope, sessionId, cwd, profile)`：只覆写本 profile 的 `ProfileSession`（`updatedAt: now`），**保留兄弟 profile 的 session**。
+- `clear(scope)`：删**整个 scope**——所有 profile 的 session 一起没。`/new`、`/cd`、`/ws use` 用：语义是"这个聊天从头来"，每个 tier 的线程都该清。
+- `clearProfile(scope, profile)`：只删**一个 profile** 的 session，兄弟 profile 保留（条目 `updatedAt` 刷新）。resume-miss 自愈专用：`channel.ts` 的 `driveAgent` 发现 `--resume` 的 session 已被 OMP 清掉（`isSessionMissingError`）时清本 tier、同一张卡片里 fresh 重试一次，不连坐其它 tier（见 [04](./04-message-pipeline.md)）。
 - `flush()` / `schedulePersist()`：串行化持久化（`this.saving = this.saving.then(写文件)`），写前 `mkdir` 父目录，写 `JSON.stringify(data, null, 2)` + 末尾换行。
 - 旧版的 `getRaw(scope)` **已删除**——嵌套化后没有调用方需要裸条目。
 
@@ -89,7 +86,7 @@ flowchart TD
   SYS["AgentEvent system{sessionId}"] -->|"仅此处持久化"| SET["sessions.set(scope, id, cwd, profile)"]
   DONE["done.sessionId"] -.->|"不持久化"| X["(忽略)"]
   MISS["--resume 报 session not found"] --> CP["clearProfile(scope, profile)<br/>只清本 tier, 同卡片 fresh 重试一次"]
-  CMD["/new · /cd · /ws use"] --> CL["clear(scope)<br/>所有 tier + idle 覆盖全清"]
+  CMD["/new · /cd · /ws use"] --> CL["clear(scope)<br/>所有 tier 会话全清"]
 ```
 
 ## 2. `WorkspaceStore`（`src/workspace/store.ts`）

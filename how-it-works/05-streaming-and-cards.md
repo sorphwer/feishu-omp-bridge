@@ -1,10 +1,10 @@
 # 05 · 流式与卡片
 
-> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `103dd04`（文档对应的源码 commit；详见 [README](./README.md)）。
 
 > 覆盖范围：`run-state.ts` 的状态类型（含 run 启动时快照的 `RunBadge`）与 `reduce()` 事件→状态全表；`run-renderer.ts` 的 CardKit 2.0 渲染（权限徽章 header、元素排序、工具折叠阈值、终结标记、footer、停止按钮）；`text-renderer.ts` 扁平 markdown 回退（顶行徽章 `badgeLine`）；`tool-render.ts` 工具头/体与截断；`managed.ts` 托管卡片生命周期；`templates.ts` 等静态/表单卡片；`dispatcher.ts` 卡片回调分发优先级（thread_id 优先的 scope 解析）；`omp-ui.ts` 交互卡片构建。
 >
-> 源文件：`src/card/run-state.ts`、`src/card/run-renderer.ts`、`src/card/text-renderer.ts`、`src/card/tool-render.ts`、`src/card/managed.ts`、`src/card/templates.ts`、`src/card/switch-card.ts`、`src/card/config-card.ts`、`src/card/account-cards.ts`、`src/card/dispatcher.ts`、`src/card/omp-ui.ts`。
+> 源文件：`src/card/run-state.ts`、`src/card/run-renderer.ts`、`src/card/text-renderer.ts`、`src/card/tool-render.ts`、`src/card/managed.ts`、`src/card/templates.ts`、`src/card/switch-card.ts`、`src/card/config-card.ts`、`src/card/dispatcher.ts`、`src/card/omp-ui.ts`。
 
 相关篇：[消息管线](./04-message-pipeline.md)（谁驱动 reduce/flush、badge 在哪里 seed）、[Agent 适配器与 OMP](./02-agent-adapter-and-omp.md)（`AgentEvent` 来源）、[访问控制与统一策略](./09-access-and-guest-sandbox.md)（profile / restricted 的语义）、[聊天命令](./10-commands.md)（命令卡片）。
 
@@ -131,7 +131,7 @@ flowchart TD
 
 ## 4. `text-renderer.ts`：扁平 markdown 回退
 
-`renderText(state): string`，用于 `messageReply:'markdown'`（**默认模式**：流式 markdown 卡片，`ctrl.setContent` 打字机）与 `'text'`（run 结束后一次性 post）。与卡片的差异：无折叠面板/按钮、工具塌成单行（`> ✅ **Read** — path`，复用 `toolHeaderText`）、不渲染 thinking、footer 直接行内追加。`renderUiContext` 把 UI 状态渲成 `> 🧩 OMP 状态` 列表。终结行：中断/超时/错误/运行中 footer。
+`renderText(state): string`，用于 `messageReply:'markdown'`（**默认模式**：流式 markdown 卡片，`ctrl.setContent` 打字机）。与卡片的差异：无折叠面板/按钮、工具塌成单行（`> ✅ **Read** — path`，复用 `toolHeaderText`）、不渲染 thinking、footer 直接行内追加。`renderUiContext` 把 UI 状态渲成 `> 🧩 OMP 状态` 列表。终结行：中断/超时/错误/运行中 footer。
 
 **`badgeLine(badge)`**：markdown 消息没有卡片 header，所以徽章渲成**顶行**——`renderText` 输出的第一个片段，如：
 
@@ -148,7 +148,7 @@ flowchart TD
 
 ## 6. `managed.ts`：托管卡片生命周期
 
-不同于流式回复卡（走 `channel.stream`），托管卡用于需要后续 `update` 的场景（OMP UI 卡、`/account`/`/config`/`/switch` 表单）。模块级 `byMessageId: Map<messageId, {cardId, sequence}>`（进程内，重启即失，可接受）：
+不同于流式回复卡（走 `channel.stream`），托管卡用于需要后续 `update` 的场景（OMP UI 卡、`/config`/`/switch` 表单）。模块级 `byMessageId: Map<messageId, {cardId, sequence}>`（进程内，重启即失，可接受）：
 
 - `sendManagedCard(channel, chatId, card, replyTo?)`：`cardkit.v1.card.create({type:'card_json', data:JSON})` 得 `card_id`；再发引用消息（`im.v1.message.reply`，有 replyTo）或顶层消息（`im.v1.message.create`，`receive_id_type:'chat_id'`）携带 `{type:'card', data:{card_id}}`；记录 `{cardId, sequence:0}`，返回 `{messageId, cardId}`。
 - `updateManagedCard(channel, messageId, card)`：按 messageId 找 entry，`sequence += 1`，`cardkit.v1.card.update({card_id, data:{card:{type:'card_json',data:JSON}, sequence}})`（递增 sequence 防乱序/被拒）。
@@ -162,7 +162,7 @@ flowchart TD
 - `statusCard(info: StatusInfo)`：scope / cwd / session / agent 四行 + “新会话/工作空间/帮助”按钮。**scope 标注**改为 `info.scope.includes(':')` 时追加 “_（话题独立 session）_”——判据是 scope 本身是否是 `chatId:threadId` 复合形态，而不再看 `chatMode==='topic'`（开启话题的普通群 chat_mode 仍是 `'group'` 但 scope 同样按线程拆分，见 `src/bot/scope.ts` 的 `scopeFor`）；`StatusInfo.chatMode` 只作参考信息保留。
 - `helpCard()`：命令清单 + 快捷按钮。
 
-`switch-card.ts`（`/switch` 模型下拉表单，`OMP_DEFAULT_MODEL_VALUE='__omp_default__'` 作“回到 OMP 默认”的非空哨兵）、`config-card.ts`（`/config` 偏好表单，`cmd:'config.submit'/'config.cancel'`）、`account-cards.ts`（`/account` 表单与校验中/成功/失败/取消各终态卡）均是 schema 2.0 表单卡，经 §6 的 `sendManagedCard`/`updateManagedCard` 管理，提交按钮带 `form_action_type:'submit'`，输入值经 `form_value` 回到 dispatcher（详见 [10](./10-commands.md)）。
+`switch-card.ts`（`/switch` 模型下拉表单，`OMP_DEFAULT_MODEL_VALUE='__omp_default__'` 作“回到 OMP 默认”的非空哨兵）、`config-card.ts`（`/config` 偏好表单，`cmd:'config.submit'/'config.cancel'`）均是 schema 2.0 表单卡，经 §6 的 `sendManagedCard`/`updateManagedCard` 管理，提交按钮带 `form_action_type:'submit'`，输入值经 `form_value` 回到 dispatcher（详见 [10](./10-commands.md)）。`/account` 表单卡（`account-cards.ts`）已随聊天内换凭据流程一起删除，换凭据改走 CLI（见 [10](./10-commands.md)）。
 
 ## 8. `dispatcher.ts`：卡片回调分发
 
@@ -204,4 +204,4 @@ flowchart TD
 
 ## 10. 卡片节奏
 
-bridge **不做自己的节流**：`processAgentStream` 每个（进 reduce 的）事件都 `flush`。card 模式的初始帧就是 `renderCard(runInitialState)`——badge header 从第一帧可见；markdown 模式每次 flush `ctrl.setContent(renderText(...))`；text 模式运行期间不发任何东西，收尾一次性 post。限速来自 SDK 的 `outbound.streamThrottleMs:400`（见 [03](./03-feishu-transport.md)）与卡片 `config.streaming_mode`（运行中为 true）。终结时 `streaming_mode` 转 false，卡片定格。
+bridge **不做自己的节流**：`processAgentStream` 每个（进 reduce 的）事件都 `flush`。card 模式的初始帧就是 `renderCard(runInitialState)`——badge header 从第一帧可见；markdown 模式每次 flush `ctrl.setContent(renderText(...))`。限速来自 SDK 的 `outbound.streamThrottleMs:400`（见 [03](./03-feishu-transport.md)）与卡片 `config.streaming_mode`（运行中为 true）。终结时 `streaming_mode` 转 false，卡片定格。

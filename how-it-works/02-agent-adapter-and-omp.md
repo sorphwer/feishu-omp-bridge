@@ -1,6 +1,6 @@
 # 02 · Agent 适配器与 OMP
 
-> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `103dd04`（文档对应的源码 commit；详见 [README](./README.md)）。
 
 > 覆盖范围：`src/agent/types.ts` 的完整类型契约（逐字段释义）；`OmpAdapter` 的探测、`run()` spawn、`AgentRun` 方法、`createEventStream` 握手循环与早退安全网、host 工具/URI 回调、`isSessionMissingError`；`rpc.ts` 的帧翻译；`args.ts` 的参数构建与 `OMP_BRIDGE_PROMPT`；`model-catalog.ts` 模块状态。末尾标注“哪些是 OMP 专属”。
 >
