@@ -190,6 +190,10 @@ export async function runStart(opts: StartOptions): Promise<void> {
       try {
         const next = await loadConfig(configPath);
         if (!isComplete(next)) throw new Error('config incomplete after change');
+        // Same fail-fast guard as the initial load in runStart(): a manual
+        // config.json edit during a running process must not silently
+        // resurrect a removed legacy field on reload (fail open).
+        assertNoLegacyPolicyFields(next);
         console.log(
           `[restart] connecting new bridge with appId=${next.accounts.app.id} tenant=${next.accounts.app.tenant}...`,
         );

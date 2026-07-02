@@ -580,7 +580,7 @@ export function assertNoLegacyPolicyFields(cfg: Partial<AppConfig>): void {
   if (offenders.length > 0) {
     throw new Error(
       `配置包含已移除的 legacy 字段：${offenders.join('、')}。` +
-        `请迁移到统一 policy（见 CONFIGURATION.zh.md §9）：` +
+        `请迁移到统一 policy（见 CONFIGURATION.zh.md §13）：` +
         `guestPolicy → profiles + rules；relay.route.users → principals.<组>.run: "worker"。`,
     );
   }
