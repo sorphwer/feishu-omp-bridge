@@ -1,6 +1,6 @@
 # 11 · 守护进程与 CLI 运行时
 
-> 源码基线：commit `78460f6`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
 
 > 覆盖范围：CLI 命令面（commander 接线）；预检（lark-cli 检测/安装/绑定、OMP 检查）；`ServiceAdapter` 接口与三平台实现（launchd/systemd/schtasks）、服务标识；`cli/commands/*`；进程注册表；日志器；进程生命周期/信号 + 未捕获异常网。
 >
@@ -13,14 +13,23 @@
 commander 程序 `feishu-omp-bridge`，默认子命令 `run`（`argv.length>2 ? argv : [...argv, 'run']`）：
 
 ```mermaid
-flowchart LR
-  CLI["feishu-omp-bridge (默认 run)"]
+flowchart TD
+  CLI["feishu-omp-bridge (无参数时默认 run)"]
   CLI --> PROC["进程级"]
   CLI --> SVC["服务级 (OS 守护)"]
   CLI --> SEC["secrets 组"]
-  PROC --> R["run · ps · kill"]
-  SVC --> S["start · stop · restart<br/>status · unregister"]
-  SEC --> SS["get · set · list · remove"]
+  PROC --> RUN["run -c/--config · --skip-check-lark-cli<br/>→ runStart (前台)"]
+  PROC --> PS["ps → runPs"]
+  PROC --> KILL["kill &lt;target&gt; → runKillCli<br/>(SIGTERM → 2s → SIGKILL)"]
+  SVC --> ST["start --skip-check-lark-cli → runServiceStart"]
+  SVC --> SP["stop → runServiceStop (停 + 禁自启)"]
+  SVC --> RS["restart → runServiceRestart"]
+  SVC --> SS2["status → runServiceStatus"]
+  SVC --> UN["unregister → runServiceUnregister"]
+  SEC --> SG["get (exec-provider, stdin/stdout JSON)"]
+  SEC --> SSET["set --app-id (隐藏输入)"]
+  SEC --> SL["list"]
+  SEC --> SR["remove --app-id"]
 ```
 
 进程级：
@@ -29,9 +38,9 @@ flowchart LR
 - `kill <target>` → `runKillCli`（按短 id / 序号杀，SIGTERM 后 2s SIGKILL）。
 
 服务级（OS 守护）：
-- `start` → `runServiceStart`（安装并启动 daemon）。
+- `start`（`--skip-check-lark-cli`） → `runServiceStart`（安装并启动 daemon）。
 - `stop` → `runServiceStop`（停且禁自启）。
-- `restart` → `runServiceRestart`。
+- `restart` → `runServiceRestart`（服务文件不存在则报错让先 `start`；没在运行则走 `start` 路径）。
 - `status` → `runServiceStatus`（pid、上次退出、日志路径）。
 - `unregister` → `runServiceUnregister`（停 + 禁自启 + 删服务文件）。
 
@@ -41,7 +50,7 @@ flowchart LR
 
 ## 2. 预检（`cli/preflight.ts`）
 
-`preFlightChecks({ skipCheckLarkCli })` → `checkLarkCli`：检测 `lark-cli` 是否安装（`isLarkCliInstalled`），未装则提示并尝试 `npm install -g @larksuite/cli` + `lark-cli config bind --source lark-channel --identity bot-only`（`runCapture` 捕获输出保持 clack spinner 干净，`INSTALL_TIMEOUT_MS=5min`、`BIND_TIMEOUT_MS=30s`），失败打印手动安装提示但不致命。`--skip-check-lark-cli` 跳过整步。OMP 可用性检查不在 preflight，而在 `runStart` 里 `agent.isAvailable()`（缺失即 `process.exit(1)`，见 [01](./01-overview-and-architecture.md)）。
+`preFlightChecks({ skipCheckLarkCli })` → `checkLarkCli`：检测 `lark-cli` 是否安装（`isLarkCliInstalled`，`lark-cli --version` 退出码），未装则提示并尝试两步（各带 clack spinner）：`npm install -g @larksuite/cli` + `lark-cli config bind --source lark-channel --identity bot-only`（`runCapture` 捕获子进程输出保持 spinner 干净，`INSTALL_TIMEOUT_MS=5min`、`BIND_TIMEOUT_MS=30s`），失败打印手动安装提示但不致命。**非 TTY**（daemon / launchd / nohup / CI）不自动安装，只打印手动提示后继续启动——因此服务级 `start` 会在写服务文件**之前**先跑同一套 preflight（此时用户在 TTY，可交互装；daemon 自己被 OS 拉起时的 preflight 是非 TTY，会静默跳过安装）。`--skip-check-lark-cli` 跳过整步。OMP 可用性检查不在 preflight，而在 `runStart` 里 `agent.isAvailable()`（缺失即 `process.exit(1)`，见 [01](./01-overview-and-architecture.md)）。
 
 ## 3. 服务适配器（`daemon/`）
 
@@ -72,7 +81,34 @@ daemon 日志：`daemonLogDir()`=`~/.feishu-omp-bridge/logs/`，`daemonStdoutPat
 - `systemd.ts`：`buildUnit`/`writeUnit`、`daemonReload`、`enableAndStart`（`enable --now`）、`stop`、`disableAndStop`、`restart`、`isActive`（`is-active`）、`describeService`、`deleteUnit`、`waitUntilInactive`。Unit 含 `Restart=always`+`RestartSec=5`。
 - `schtasks.ts`：`buildLauncherCmd`/`writeLauncherCmd`、`installTask`（触发 ONLOGON，`/Create /F`）、`runTask`/`endTask`/`disableTask`/`enableTask`/`endAndDisable`/`restartTask`（end→wait→run）、`isTaskRegistered`/`isTaskRunning`（解析 `/Query /V /FO LIST`）、`describeTask`、`waitUntilStopped`、`deleteTask`。
 
-`cli/commands/service.ts`：`requireAdapter`（无适配器友好退出）、`reportConnectAfter`（start/restart 后轮询注册表等新条目出现再打印连接行，与 `run` 一致）、`runServiceStart/Stop/Restart/Status/Unregister`、`ensureBridgeConfigured`、`formatServiceStderr`/`printServiceFailure`（中文化常见失败）。
+`cli/commands/service.ts`：`requireAdapter`（无适配器友好退出）、`ensureBridgeConfigured`（`loadConfig` + `isComplete`，未配置则提示先跑 `run` 扫码向导并退出）、`waitForServiceConnect`/`reportConnectAfter`（start/restart 前快照同 appId 的 `beforePids`，下发 OS 动作后每 500ms 轮询 `processes.json`，最多 30s，找 appId 匹配、pid 不在 `beforePids`、且 `botName` 已填的新条目——`botName` 只在 WS 握手成功后回填，见 §6，故看到即真在线；超时则警告并给出 daemon 日志路径）、`runServiceStart/Stop/Restart/Status/Unregister`、`formatServiceStderr`/`printServiceFailure`（中文化常见失败，如“旧实例还在收尾”）。
+
+`runServiceStart` 的完整生命周期（`install()` 总是重写服务文件，吸收当前 `process.execPath` 与 `PATH`，防运行时版本切换后失效）：
+
+```mermaid
+sequenceDiagram
+  participant U as 用户 shell
+  participant S as runServiceStart
+  participant A as ServiceAdapter
+  participant R as processes.json 注册表
+  participant D as daemon 进程 (run)
+  U->>S: feishu-omp-bridge start
+  S->>S: requireAdapter + ensureBridgeConfigured
+  S->>S: preFlightChecks (TTY,可交互装 lark-cli)
+  S->>A: install() 重写 plist/unit/.cmd + reload
+  alt 旧实例还在运行
+    S->>A: stop() + waitUntilStopped()<br/>(没停干净则提示 unregister 后 exit 1)
+  end
+  S->>R: 快照 beforePids (同 appId 存活 pid)
+  S->>A: start()
+  A->>D: OS 拉起 daemon (非 TTY 的 run)
+  D->>R: register(...) 写入条目
+  D->>R: WS 握手成功后 updateEntry 补 botName
+  loop 每 500ms,最多 30s
+    S->>R: readAndPrune() 找新条目<br/>(appId 匹配 · pid 不在 beforePids · botName 已填)
+  end
+  S-->>U: ✓ 已启动 bot ... 进程 id<br/>(超时: ⚠ + daemon 日志路径)
+```
 
 ## 4. 进程注册表（`runtime/registry.ts`）
 
@@ -100,16 +136,19 @@ daemon 日志：`daemonLogDir()`=`~/.feishu-omp-bridge/logs/`，`daemonStdoutPat
 `runStart`（`cli/commands/start.ts`，见 [01](./01-overview-and-architecture.md)）：
 - 顶部 `process.on('unhandledRejection')` / `process.on('uncaughtException')` 只记 `log.fail('process', ...)` 不退出——丢一条回复也比崩掉强。
 - `dns.setDefaultResultOrder('ipv4first')` 规避 IPv6 坏路由。
+- 启动即 `register({appId, tenant, configPath, version, role})` 写注册表；`startBridge` 完成（WS 握手成功）后 `updateEntry(entry.id, { botName })` 回填 bot 显示名——`reportConnectAfter`（§3）和同应用冲突提示都靠它判断“真在线”。
 - `stop(sig)`：幂等，断开 bridge、`unregisterSync(entry.id)`、`process.exit(0)`。注册到 `SIGINT`/`SIGTERM`。
 - `process.on('exit')`：`unregisterSync` + `cleanupTmpFiles`（兜底，防绕过 stop 的退出留下陈旧条目）。
-- `controls.restart()`：**连后断**——先 `startBridge` 新 bridge，成功才断旧 bridge（新 bridge 起不来时抛错保留旧 bridge 及其 keepalive，下一 keepalive tick 可重试）。`/account`、`/reconnect`、keepalive 强制重连都走它。
+- `controls.restart()`：**连后断**——`restarting` 标志防重入；先 `loadConfig(configPath)` 重读磁盘配置（`isComplete` 不过即抛错），再 `startBridge` 新 bridge，成功才断旧 bridge（新 bridge 起不来时抛错保留旧 bridge 及其 keepalive，下一 keepalive tick ~15s 后可重试）；换毕 `controls.cfg = next` 并 `updateEntry(entry.id, {appId, tenant, configPath, botName})` 同步注册表（`/ps` 立刻反映新 app）。`/account`、`/reconnect`、keepalive 强制重连都走它。
 
 ```mermaid
 flowchart LR
-  REQ["controls.restart()<br/>(/account · /reconnect · keepalive)"] --> NEW["startBridge 新 bridge"]
+  REQ["controls.restart()<br/>(/account · /reconnect · keepalive)"] --> CFG["loadConfig(configPath) 重读<br/>isComplete 校验"]
+  CFG --> NEW["startBridge 新 bridge"]
   NEW --> OK{"起来了?"}
-  OK -->|是| KILL["断开旧 bridge (连后断)"]
-  OK -->|否| KEEP["抛错: 保留旧 bridge + keepalive<br/>下一 tick 重试"]
+  OK -->|"是"| KILL["断开旧 bridge (连后断)"]
+  KILL --> SYNC["controls.cfg = next<br/>updateEntry 同步注册表 (appId/tenant/botName)"]
+  OK -->|"否"| KEEP["抛错: 保留旧 bridge + keepalive<br/>下一 tick (~15s) 重试"]
 ```
 
 

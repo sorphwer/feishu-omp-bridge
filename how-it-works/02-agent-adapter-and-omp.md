@@ -1,8 +1,8 @@
 # 02 · Agent 适配器与 OMP
 
-> 源码基线：commit `78460f6`（文档对应的源码 commit；详见 [README](./README.md)）。
+> 源码基线：commit `33bcea3`（文档对应的源码 commit；详见 [README](./README.md)）。
 
-> 覆盖范围：`src/agent/types.ts` 的完整类型契约（逐字段释义）；`OmpAdapter` 的探测、`run()` spawn、`AgentRun` 方法、`createEventStream` 握手循环、host 工具/URI 回调；`rpc.ts` 的帧翻译；`args.ts` 的参数构建与 `OMP_BRIDGE_PROMPT`；`model-catalog.ts` 模块状态。末尾标注“哪些是 OMP 专属”。
+> 覆盖范围：`src/agent/types.ts` 的完整类型契约（逐字段释义）；`OmpAdapter` 的探测、`run()` spawn、`AgentRun` 方法、`createEventStream` 握手循环与早退安全网、host 工具/URI 回调、`isSessionMissingError`；`rpc.ts` 的帧翻译；`args.ts` 的参数构建与 `OMP_BRIDGE_PROMPT`；`model-catalog.ts` 模块状态。末尾标注“哪些是 OMP 专属”。
 >
 > 源文件：`src/agent/types.ts`、`src/agent/index.ts`、`src/agent/omp/adapter.ts`、`src/agent/omp/rpc.ts`、`src/agent/omp/args.ts`、`src/agent/omp/model-catalog.ts`。
 
@@ -37,7 +37,7 @@ type AgentEvent =
 
 逐项含义：
 
-- `system`：会话元数据。**`sessionId` 在此事件上被持久化**（`processAgentStream` 见到 `system` 且 `sessionId` 非空就 `sessions.set(scope, sessionId, cwd)`）。`done.sessionId` 不会被持久化——这是设计上的关键不对称（见 [04](./04-message-pipeline.md) §流处理；也是 [dify-adapter](../dify-feishu-bridge-design/03-dify-adapter.md) 必须 emit `system` 的原因）。`cwd` 可覆盖记录的 cwd；`model` 仅用于日志/展示。
+- `system`：会话元数据。**`sessionId` 在此事件上被持久化**（`processAgentStream` 见到 `system` 且 `sessionId` 非空就 `sessions.set(scope, evt.sessionId, effectiveCwd, profileName)`——session 现在按 `(scope, profile)` 二维存取，见 [04](./04-message-pipeline.md)）。`done.sessionId` 不会被持久化——这是设计上的关键不对称（见 [04](./04-message-pipeline.md) §流处理；也是 [dify-adapter](../dify-feishu-bridge-design/03-dify-adapter.md) 必须 emit `system` 的原因）。`cwd` 可覆盖记录的 cwd；`model` 仅用于日志/展示。
 - `text` / `thinking`：增量文本片段，reduce 时拼接到当前 text block / reasoning。
 - `tool_use`：工具开始，`id` 是工具调用 id、`name` 工具名、`input` 任意入参。
 - `tool_update`：工具增量输出（按行追加到该 `id` 的 output）。
@@ -121,7 +121,7 @@ interface AgentAdapter {
 
 - `events`、`stop`、`waitForExit` **必需**；`respondToUi`、`submitPrompt` **可选**。
 - `respondToUi` 缺失是安全降级：`ActiveRuns.respondToUi` 用 `?.` 调用，缺失即返回 false。
-- `submitPrompt` 缺失是安全降级：`ActiveRuns.submitPrompt` 用 `?? Promise.resolve(false)`，缺失即返回 false → `submitToActiveRun` 返回 false → 消息回落到 `pending.push`（排到下一轮，见 [04](./04-message-pipeline.md)）。
+- `submitPrompt` 缺失是安全降级：`ActiveRuns.submitPrompt` 用 `?? Promise.resolve(false)`，缺失即返回 false → `submitToActiveRun` 按 `'no-run'` 处理 → 消息回落到 `pending.push`（排到下一轮）。注意 mid-run 注入在到达适配器之前还有一道与适配器无关的 profile 门控（`injectionDecision`，`submitToActiveRun` 返回 `'injected' | 'deferred' | 'no-run'` 三态），见 [04](./04-message-pipeline.md)。
 - `waitForExit(timeoutMs)`：终结事件（`done`/`error`）后等子进程自然退出的窗口；超时返回 false，调用方再 `stop()`。注释解释为何不立刻 stop：终结事件可能早于 stdout 真正关闭，过早 stop 会把干净退出变成信号退出。
 
 `src/agent/index.ts` 重导出类型 + `OmpAdapter` + model-catalog 的若干函数（`getAuthenticatedProviders` / `getDefaultRoleModel` / `setAuthenticatedProviders` / `setModelCatalog` / `setModelRoles` / `roleModels` / `OmpModelInfo`）。
@@ -147,49 +147,95 @@ interface AgentAdapter {
 返回的 `AgentRun`：
 
 - `events`：`createEventStream(child, stderrChunks, () => runtimeError, opts)`。
-- `stop()`：宽限阶梯（grace ladder）——若已退出直接返回；否则写 `{type:'abort'}` 帧 + `endInput`，等 `min(1000, stopGraceMs)`；仍在就 `SIGTERM`，等 `stopGraceMs`；仍在就 `SIGKILL` 并 `waitForExit`。这给 OMP 及其子进程（如 lark-cli 正在 OAuth）留清理时间。
+- `stop()`：宽限阶梯（grace ladder）——若已退出直接返回；否则写 `{id:'abort_1', type:'abort'}` 帧 + `endInput`，等 `min(1000, stopGraceMs)`；仍在就 `SIGTERM`，等 `stopGraceMs`；仍在就 `SIGKILL` 并 `waitForExit`。这给 OMP 及其子进程（如 lark-cli 正在 OAuth）留清理时间。
 - `respondToUi(requestId, response)`：未退出时写 `{type:'extension_ui_response', id, ...response}`。
 - `submitPrompt(kind, message, imagePaths?)`：未退出时 `loadOmpImages` 后写 `{id:'${kind}_${ts}', type: kind, message: buildOmpPrompt(message), images?}`（`kind` 即 `steer`/`follow_up`）。
 - `waitForExit(timeoutMs)`：`waitForExitWithin`，子进程在窗口内退出返 true，否则 false。
 
 ### 2.3 `createEventStream`：JSONL 握手循环
 
+从 spawn 到 reap 的完整 RPC 握手（reap 侧的 `reapRun` 属于 `src/bot/channel.ts`，详见 [04](./04-message-pipeline.md)，此处画全以便对照）：
 
 ```mermaid
 sequenceDiagram
-  participant B as bridge (createEventStream)
-  participant O as omp --mode rpc
+  participant C as channel.ts (processAgentStream / reapRun)
+  participant B as OmpAdapter (createEventStream)
+  participant O as omp --mode rpc 子进程
+  C->>B: agent.run(opts)，迭代 run.events
+  B->>O: spawn(binary, buildOmpArgs, env FEISHU_OMP_BRIDGE=1)
+  Note over B: 安装早退安全网：child exit 后 250ms 强制 rl.close()
   O-->>B: ready 帧
-  B->>O: set_host_tools (hostTools 非空时)
-  B->>O: set_host_uri_schemes (有则)
-  B->>O: get_state (state_1)
-  B->>O: prompt (prompt_1, buildOmpPrompt + images)
+  B->>O: set_host_tools (id host_tools_1，hostTools 非空时)
+  B->>O: set_host_uri_schemes (id host_uri_schemes_1，有则)
+  B->>O: get_state (id state_1)
+  B->>O: prompt (id prompt_1，buildOmpPrompt + images)
   loop 每行 JSONL
+    O-->>B: response(get_state)
+    B-->>C: system{sessionId, model} → sessions.set 持久化
     O-->>B: host_tool_call / host_uri_request
-    B->>O: host_tool_result / host_uri_result
+    B->>O: host_tool_result / host_uri_result（进程内执行后写回）
     O-->>B: message_update / tool_execution_* / turn_end ...
-    Note over B: translateOmpFrame → AgentEvent (yield)
+    B-->>C: translateOmpFrame → AgentEvent (yield)
   end
-  O-->>B: agent_end → done (terminal, break)
+  O-->>B: agent_end
+  B-->>C: done（terminal，endInput + break）
+  C->>B: reapRun：waitForExit(POST_DONE_EXIT_GRACE_MS=2000)
+  alt 窗口内自然退出
+    O-->>B: exit code 0
+  else 超时或 interrupted
+    C->>B: stop() 宽限阶梯 abort → SIGTERM → SIGKILL
+  end
 ```
 
 异步生成器，逐行读 child.stdout（`readline`），每行 `parseOmpJsonLine`：
 
 1. 若 `child.pid` 缺失 → emit `error` 并返回。
-2. **ready 帧**（`isReadyFrame`）：依次写
+2. **早退安全网（`EXIT_DRAIN_GRACE_MS = 250`）**：进入循环前先注册——child 一旦 `exit`（或此刻已退出），250ms 后强制 `rl.close()`（`setTimeout(...).unref()`）。背景：omp 快速启动失败（典型如 `--resume` 一个 omp 已不存在的 session）时可能退出而 stdout 管道不干净 EOF，`for await (const line of rl)` 会永远挂起，消费方只能等几分钟后的 idle watchdog。强制关 reader 让流程落到循环后的退出/错误处理，**及时产出 terminal 事件**；250ms 的宽限同时让已缓冲的最后几行 flush 完。
+3. **ready 帧**（`isReadyFrame`）：依次写
    - `set_host_tools`（当 `opts.hostTools` 非空，body 为各 tool 的 `definition`）；
    - `set_host_uri_schemes`（当 `opts.hostUriSchemes` 非空）；
    - `get_state`（id `state_1`）；
    - `prompt`（id `prompt_1`，`message: buildOmpPrompt(opts.prompt)`，附 `loadOmpImages(opts.imagePaths)`）。
-   任一写失败 → emit `error`、`endInput`、break。
-3. **host 回调**：`host_tool_call` → `handleHostToolCall`；`host_uri_request` → `handleHostUriRequest`；`host_tool_cancel`/`host_uri_cancel` → 记日志跳过。
-4. 其它帧 → `translateOmpFrame` 产出的每个 `AgentEvent` yield 出去；遇 `done`/`error` 置 `terminal`，`endInput` + break。
-5. 循环结束后 `waitForExit`，按退出码/信号/是否见过 ready/prompt 决定是否补一个 `error` 事件（如 `omp exited with code N`、`omp exited before sending ready frame`）。
+   任一写失败 → emit `error`、置 `terminal`、`endInput`、break。
+4. **host 回调**：`host_tool_call` → `handleHostToolCall`；`host_uri_request` → `handleHostUriRequest`；`host_tool_cancel`/`host_uri_cancel` → 记日志跳过。
+5. 其它帧 → `translateOmpFrame` 产出的每个 `AgentEvent` yield 出去；遇 `done`/`error` 置 `terminal`，`endInput` + break。
+6. 循环结束（`finally` 里再 `rl.close()` 兜底）后 `waitForExit`，按退出码/信号/是否见过 ready/prompt 决定是否补一个 `error` 事件。
+
+循环结束后的退出/异常路径全貌（含 session-missing 自愈的衔接点）：
+
+```mermaid
+flowchart TD
+  L["for await 行循环 (readline)"] -->|"translateOmpFrame 产出 done/error"| T["terminal=true<br/>endInput + break"]
+  L -->|"stdout 自然 EOF"| W
+  L -.->|"omp 早退但 stdout 不 EOF"| G["child exit 后 250ms<br/>强制 rl.close()（安全网）"]
+  G --> W["waitForExit(child)"]
+  T --> W
+  W --> D{"退出码 / 信号 / 阶段判定（if 链）"}
+  D -->|"code ≠ 0 且无信号"| E1["yield error:<br/>omp exited with code N + stderr 尾巴"]
+  D -->|"runtimeError（spawn 失败等）"| E2["yield error: omp runtime error"]
+  D -->|"未 terminal 且未见 ready"| E3["yield error:<br/>omp exited before sending ready frame"]
+  D -->|"未 terminal 且 prompt 未送达"| E4["yield error:<br/>omp exited before prompt was accepted"]
+  D -->|"其余（已 terminal 的干净退出）"| OK["流正常结束"]
+  E1 --> S{"channel.ts：isSessionMissingError<br/>且本次带 --resume？"}
+  S -->|"是"| H["resume 自愈：clearProfile +<br/>同卡片 fresh 重试（见 04）"]
+  S -->|"否"| R["error 正常渲染进卡片"]
+```
 
 ### 2.4 host 回调处理
 
 - `handleHostToolCall(child, tools, frame)`：先 emit `tool_use`（用 `frame.toolCallId`）；按 `frame.toolName` 找 tool，找不到 → 写 `host_tool_result {isError:true}` + emit `tool_result` 错误；找到则 `tool.execute(frame.arguments)`，写回 `host_tool_result`（`normalizeToolResult` 包成 `{content:[{type:'text',text}]}` 形态）+ emit `tool_result`。
 - `handleHostUriRequest(child, schemes, frame)`：先 emit `tool_use`（name `host_uri_<op>`）；按 `schemeOf(url)` 找 scheme，调用 `handler.handle({operation,url,content})`，写回 `host_uri_result` + emit `tool_result`。
+
+### 2.5 `isSessionMissingError`：session 丢失的判定契约
+
+```ts
+const SESSION_MISSING_RE = /session\b[\s\S]*\bnot found/i;
+export function isSessionMissingError(message: string | undefined): boolean;
+```
+
+`adapter.ts` 导出的纯判定函数（注意：走 `src/agent/omp/adapter` 直接 import，`src/agent/index.ts` **不**重导出它）。匹配 omp 被要求 `--resume` 一个它已不存在的 session 时的报错文本——前一次 run 崩溃于持久化之前，或 omp 侧 session store 被清理。这个报错通常以 stderr 尾巴的形式出现在 §2.3 补出的 `error` 事件里，如 `omp exited with code 1: Error: Session "..." not found.`；正则跨行（`[\s\S]*`）、大小写不敏感，`message` 为 `undefined` 时返回 false。
+
+契约仅此而已——**自愈逻辑本体不在适配器里**：`src/bot/channel.ts` 的 `processAgentStream` 在带 `--resume` 启动的 run 上，对每个 `error` 事件调用它，命中即不渲染错误、`sessions.clearProfile(scope, profile.name)` 后在同一张卡片里用 fresh session 重试一次，详见 [04 消息管线](./04-message-pipeline.md)。
 
 ## 3. 帧翻译（`src/agent/omp/rpc.ts`）
 
@@ -227,4 +273,4 @@ sequenceDiagram
 
 ## 6. 这些里哪些是 OMP 专属
 
-整棵 `src/agent/omp/` 子树（`adapter.ts` / `rpc.ts` / `args.ts` / `model-catalog.ts` 及其 `*.test.ts`）+ `OMP_BRIDGE_PROMPT` 是 OMP 专属。`src/agent/types.ts` 是后端无关契约。换后端时，前者整体替换、后者仅做最小增量（见 [reuse matrix](../dify-feishu-bridge-design/01-architecture-and-reuse-matrix.md)）。
+整棵 `src/agent/omp/` 子树（`adapter.ts` / `rpc.ts` / `args.ts` / `model-catalog.ts` 及其 `*.test.ts`）+ `OMP_BRIDGE_PROMPT` 是 OMP 专属。`isSessionMissingError`（§2.5）也是 OMP 专属——它匹配的是 omp 的报错文案，`channel.ts` 对它的 import 是目前 bridge 通用层对 `src/agent/omp/` 的唯一直接依赖，换后端时需要给出等价判定（或让判定恒为 false 放弃自愈）。`src/agent/types.ts` 是后端无关契约。换后端时，前者整体替换、后者仅做最小增量（见 [reuse matrix](../dify-feishu-bridge-design/01-architecture-and-reuse-matrix.md)）。
