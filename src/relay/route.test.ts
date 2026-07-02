@@ -7,7 +7,8 @@ import type { RelayEvent } from './protocol';
 function cfgWith(users: string[]): AppConfig {
   return {
     accounts: { app: { id: 'cli_x', secret: 's', tenant: 'feishu' } },
-    relay: { role: 'front', route: { users } },
+    relay: { role: 'front' },
+    policy: users.length > 0 ? { principals: { relay: { users, run: 'worker' } } } : {},
   };
 }
 

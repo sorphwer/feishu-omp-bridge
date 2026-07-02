@@ -20,68 +20,15 @@ function cfg(partial: Partial<AppConfig>): AppConfig {
   };
 }
 
-describe('legacy synthesis — no guestPolicy', () => {
-  it('runs everyone full and relays the route.users set to a worker', () => {
-    const c = cfg({ relay: { role: 'front', route: { users: ['ou_me'] } } });
-    expect(resolvePolicy(c, { senderId: 'ou_me', chat: 'p2p' }).profile.name).toBe('full');
-    expect(resolvePolicy(c, { senderId: 'ou_anyone', chat: 'group' }).profile.name).toBe('full');
-    expect(relayRunTarget(c, 'ou_me')).toBe('worker');
-    expect(relayRunTarget(c, 'ou_anyone')).toBe('front');
-  });
-
-  it('relays nobody when there is no relay config', () => {
-    const c = cfg({});
-    expect(relayRunTarget(c, 'ou_me')).toBe('front');
-    expect(resolvePolicy(c, { senderId: 'ou_me', chat: 'p2p' }).profile.name).toBe('full');
-  });
-});
-
-describe('legacy synthesis — with guestPolicy', () => {
-  const c = cfg({
-    preferences: {
-      access: { admins: ['ou_owner'] },
-      guestPolicy: {
-        unrestrictedUsers: ['ou_owner'],
-        commandTools: [{ name: 'zendesk_kg', command: 'zendesk-kg' }],
-        extraToolAllowlist: ['read'],
-      },
-    },
-    relay: { role: 'front' },
-  });
-
-  it('gives the owner full tools in a DM', () => {
-    const r = resolvePolicy(c, { senderId: 'ou_owner', chat: 'p2p' });
-    expect(r.profile.name).toBe('full');
-    expect(r.profile.restricted).toBe(false);
-  });
-
-  it('sandboxes the owner in a group (shared space)', () => {
-    const r = resolvePolicy(c, { senderId: 'ou_owner', chat: 'group' });
-    expect(r.profile.name).toBe('guest');
-    expect(r.profile.restricted).toBe(true);
-    expect(r.profile.builtinTools).toEqual(['read']);
-    expect(r.profile.commandTools.map((t) => t.name)).toEqual(['zendesk_kg']);
-    expect(r.profile.discovery).toBe(false);
-    expect(r.profile.memory).toBe(false);
-  });
-
-  it('sandboxes a stranger even in a DM', () => {
-    const r = resolvePolicy(c, { senderId: 'ou_stranger', chat: 'p2p' });
-    expect(r.profile.name).toBe('guest');
-    expect(r.profile.restricted).toBe(true);
-  });
-
-  it('routes the owner to a worker and strangers to the front', () => {
-    expect(relayRunTarget(c, 'ou_owner')).toBe('worker');
-    expect(relayRunTarget(c, 'ou_stranger')).toBe('front');
-  });
-
-  it('falls back to admins for the unrestricted set', () => {
-    const c2 = cfg({
-      preferences: { access: { admins: ['ou_admin'] }, guestPolicy: { commandTools: [] } },
-    });
-    expect(resolvePolicy(c2, { senderId: 'ou_admin', chat: 'p2p' }).profile.name).toBe('full');
-    expect(resolvePolicy(c2, { senderId: 'ou_other', chat: 'p2p' }).profile.name).toBe('guest');
+describe('effectivePolicy without explicit policy', () => {
+  it('falls back to everyone-full, nobody-relayed', () => {
+    const c = {} as AppConfig;
+    const p = effectivePolicy(c);
+    expect(p.rules).toEqual([{ profile: 'full' }]);
+    expect(Object.keys(p.principals ?? {})).toHaveLength(0);
+    const { profile } = resolveBatchProfile(c, ['ou_anyone'], { chat: 'group' });
+    expect(profile.name).toBe('full');
+    expect(relayRunTarget(c, 'ou_anyone', 'p2p')).toBe('front');
   });
 });
 
