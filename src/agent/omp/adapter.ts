@@ -6,6 +6,7 @@ import { log } from '../../core/logger';
 import type { AgentAdapter, AgentEvent, AgentHostTool, AgentHostUriScheme, AgentRun, AgentRunOptions, AgentUiResponse } from '../types';
 import { buildOmpArgs, buildOmpPrompt } from './args';
 import type { OmpModelInfo, OmpModelRoles } from './model-catalog';
+import { setModelCatalog, setModelRoles } from './model-catalog';
 import {
   isReadyFrame,
   loadOmpImages,
@@ -117,6 +118,19 @@ export class OmpAdapter implements AgentAdapter {
     collect(parsed.reports);
     collect(parsed.accountsWithoutUsage);
     return [...providers];
+  }
+
+  /**
+   * Re-probe the model catalog and role bindings and push them into the
+   * in-memory catalog. Used by `/switch` so the picker reflects OMP config
+   * changes (e.g. a new role model) made after the bridge started. Auth
+   * providers are not re-probed — `omp usage --json` can hit the network and
+   * auth state changes rarely.
+   */
+  async refreshModels(): Promise<void> {
+    const [catalog, roles] = await Promise.all([this.listModels(), this.getModelRoles()]);
+    setModelCatalog(catalog);
+    setModelRoles(roles);
   }
 
   /**

@@ -130,4 +130,7 @@ export interface AgentAdapter {
   readonly displayName: string;
   isAvailable(): Promise<boolean>;
   run(opts: AgentRunOptions): AgentRun;
+  /** Optional: re-probe live model info (catalog / role bindings) so pickers
+   * reflect config changes made after startup. */
+  refreshModels?(): Promise<void>;
 }

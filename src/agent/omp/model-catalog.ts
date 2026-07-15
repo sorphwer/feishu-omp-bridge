@@ -1,6 +1,7 @@
 /**
- * Live OMP model catalog, populated once at startup from `omp models --json`
- * (see {@link OmpAdapter.listModels}). The `/switch` picker reads this to
+ * Live OMP model catalog, populated at startup from `omp models --json` and
+ * re-probed each time `/switch` opens (see {@link OmpAdapter.refreshModels}).
+ * The `/switch` picker reads this to
  * present a two-level provider→model choice over the actually-available
  * catalog rather than a hardcoded subset.
  *
@@ -48,8 +49,8 @@ export function getDefaultRoleModel(): string | undefined {
   return modelRoles.default;
 }
 
-/** Replace the in-memory catalog. Called once at startup with the probe
- * result; an empty list is ignored so the fallback stays in effect. */
+/** Replace the in-memory catalog (at startup and on `/switch` re-probe);
+ * an empty list is ignored so the fallback stays in effect. */
 export function setModelCatalog(models: OmpModelInfo[]): void {
   catalog = Array.isArray(models) ? models.filter((m) => m && m.provider && m.id && m.selector) : [];
 }

@@ -1078,6 +1078,11 @@ async function handleSwitch(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function showSwitchForm(ctx: CommandContext): Promise<void> {
+  // Re-probe catalog + role bindings so the picker reflects OMP config
+  // changes (e.g. a new role model) made after the bridge started.
+  await ctx.agent.refreshModels?.().catch((err) =>
+    log.warn('command', 'switch-refresh-models-failed', { err: String(err) }),
+  );
   const current = getOmpModel(ctx.controls.cfg);
   const card = switchModelFormCard({
     current,
