@@ -41,16 +41,17 @@ const DISCOVERY_SOURCES = [
   'agents-md',
 ];
 
-/**
- * `--tools` value forcing ZERO built-ins. OMP treats an unknown tool name as
- * "allow nothing matching" rather than an error, and an empty `--tools` is
- * dropped (reverting to full defaults), so we need a non-empty sentinel.
- */
-const NO_BUILTINS_SENTINEL = '__bridge_no_builtins__';
-
 export interface GuestRunArgs {
-  /** `--tools` allowlist; undefined = no restriction (full built-ins). */
+  /**
+   * `--tools` allowlist (built-in tool names ONLY); undefined = no
+   * restriction (full built-ins). Host tools (command tools, Feishu host
+   * tools) are registered over RPC and survive `--tools` filtering, and newer
+   * OMP rejects unknown names in `--tools` — so they must never appear here.
+   * The fail-closed hook enforces the full allowlist including host tools.
+   */
   tools?: string;
+  /** True when the profile pins ZERO built-ins → emit `--no-tools`. */
+  noBuiltins?: boolean;
   configOverlayPaths: string[];
   extensionPaths: string[];
 }
@@ -205,7 +206,8 @@ export async function buildProfileRunArgs(profile: ResolvedProfile): Promise<Gue
     ({ overlayPath, hookPath } = await ensureArtifacts(sig, join(paths.guestDir, sig), overlay, hook));
   }
   return {
-    tools: restricted ? (allowlist.length > 0 ? allowlist.join(',') : NO_BUILTINS_SENTINEL) : undefined,
+    tools: restricted && profile.builtinTools.length > 0 ? [...new Set(profile.builtinTools)].join(',') : undefined,
+    noBuiltins: restricted && profile.builtinTools.length === 0,
     configOverlayPaths: overlayPath ? [overlayPath] : [],
     extensionPaths: [...(hookPath ? [hookPath] : []), ...custom],
   };

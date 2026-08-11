@@ -88,6 +88,8 @@ export interface AgentRunOptions {
   permissionMode?: 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
   /** Per-run OMP tool allowlist (`--tools`); overrides the adapter default. */
   tools?: string;
+  /** Disable ALL built-in tools (`--no-tools`); host tools still register. */
+  noBuiltins?: boolean;
   /** Per-run OMP config overlay file paths (`--config`), applied in order. */
   configOverlayPaths?: string[];
   /** Per-run OMP extension/hook file paths (`--extension`). */

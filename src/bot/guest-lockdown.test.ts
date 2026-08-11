@@ -79,4 +79,25 @@ describe('buildProfileRunArgs', () => {
     expect(args.configOverlayPaths).toEqual([]);
     expect(args.extensionPaths).toEqual(['/abs/custom-hook.mjs']);
   });
+
+  it('puts ONLY built-in tool names in --tools; command tools ride the hook', async () => {
+    const args = await buildProfileRunArgs({
+      name: 'kb', restricted: true, builtinTools: ['read'],
+      commandTools: [{ name: 'zendesk_kg', command: 'zendesk-kg', timeoutMs: 1000, maxOutputBytes: 1000 }],
+      feishuHostTools: true, discovery: false, memory: false, maxToolCalls: 0, extensions: [],
+    });
+    expect(args.tools).toBe('read');
+    expect(args.noBuiltins).toBe(false);
+    expect(args.extensionPaths.length).toBe(1);
+  });
+
+  it('requests --no-tools when a restricted profile pins zero built-ins', async () => {
+    const args = await buildProfileRunArgs({
+      name: 'locked', restricted: true, builtinTools: [],
+      commandTools: [{ name: 'zendesk_kg', command: 'zendesk-kg', timeoutMs: 1000, maxOutputBytes: 1000 }],
+      feishuHostTools: false, discovery: false, memory: false, maxToolCalls: 0, extensions: [],
+    });
+    expect(args.tools).toBeUndefined();
+    expect(args.noBuiltins).toBe(true);
+  });
 });

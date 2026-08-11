@@ -50,4 +50,9 @@ describe('buildOmpArgs', () => {
     expect(args).toContain('--tools');
     expect(args).toContain('read,bash,edit');
   });
+  it('emits --no-tools and drops --tools when noBuiltins is set', () => {
+    const args = buildOmpArgs({ prompt: 'p', tools: 'read', noBuiltins: true });
+    expect(args).toContain('--no-tools');
+    expect(args).not.toContain('--tools');
+  });
 });

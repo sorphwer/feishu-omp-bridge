@@ -59,8 +59,12 @@ export function buildOmpArgs(opts: BuildOmpArgsOptions): string[] {
   const thinking = clean(opts.thinking);
   if (thinking) args.push('--thinking', thinking);
 
-  const tools = clean(opts.tools);
-  if (tools) args.push('--tools', tools);
+  if (opts.noBuiltins) {
+    args.push('--no-tools');
+  } else {
+    const tools = clean(opts.tools);
+    if (tools) args.push('--tools', tools);
+  }
 
   for (const overlay of opts.configOverlayPaths ?? []) {
     const p = clean(overlay);

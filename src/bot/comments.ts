@@ -146,6 +146,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
       cwd,
       hostTools: commandTools,
       tools: guestArgs.tools,
+      noBuiltins: guestArgs.noBuiltins,
       configOverlayPaths: guestArgs.configOverlayPaths,
       extensionPaths: guestArgs.extensionPaths,
     });

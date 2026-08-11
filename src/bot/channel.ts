@@ -830,6 +830,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         hostTools,
         hostUriSchemes,
         tools: guestArgs?.tools,
+        noBuiltins: guestArgs?.noBuiltins,
         configOverlayPaths: guestArgs?.configOverlayPaths,
         extensionPaths: guestArgs?.extensionPaths,
       }),
