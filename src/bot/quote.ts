@@ -2,6 +2,7 @@ import type {
   ApiMessageItem,
   LarkChannel,
   RawMessageEvent,
+  ResourceDescriptor,
 } from '@larksuiteoapi/node-sdk';
 import { normalize } from '@larksuiteoapi/node-sdk';
 import { log } from '../core/logger';
@@ -19,6 +20,10 @@ export interface QuotedContext {
    * </forwarded_messages>` (capped at 50 items by the SDK). */
   content: string;
   rawContentType: string;
+  /** Attachments (file/image/media) carried by the quoted message. The
+   * caller resolves these through the media cache — using the QUOTED
+   * message's id — so "reply to a file and ask about it" works. */
+  resources: ResourceDescriptor[];
 }
 
 /**
@@ -136,6 +141,7 @@ export async function fetchQuotedContext(
       // — substitute the raw JSON so OMP can still see what was quoted.
       content: expandInteractiveCard(normalized.content, parent.body?.content),
       rawContentType: parent.msg_type ?? 'text',
+      resources: normalized.resources ?? [],
     };
   } catch (err) {
     log.warn('quote', 'normalize-failed', {

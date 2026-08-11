@@ -652,13 +652,16 @@ async function submitToActiveRun(deps: {
     return 'deferred';
   }
   const resources = msg.resources.map((resource) => ({ messageId: msg.messageId, resource }));
-  const attachments = await media.resolve(msg.chatId, resources);
-  const imagePaths = attachments.filter((attachment) => attachment.kind === 'image').map((attachment) => attachment.path);
   const quotes: QuotedContext[] = [];
   if (msg.replyToMessageId) {
     const quote = await fetchQuotedContext(channel, msg.replyToMessageId);
     if (quote) quotes.push(quote);
   }
+  const quoteResources = quotes.flatMap((q) =>
+    q.resources.map((resource) => ({ messageId: q.messageId, resource })),
+  );
+  const attachments = await media.resolve(msg.chatId, [...resources, ...quoteResources]);
+  const imagePaths = attachments.filter((attachment) => attachment.kind === 'image').map((attachment) => attachment.path);
   const prompt = buildPrompt([msg], attachments, quotes);
   const trimmed = msg.content.trimStart();
   const kind = trimmed.startsWith('!') ? 'steer' : 'follow_up';
@@ -710,13 +713,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const resourceItems = batch.flatMap((m) =>
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
   );
-  const attachments = await media.resolve(chatId, resourceItems);
-  if (attachments.length > 0) {
-    log.info('media', 'resolved', { count: attachments.length });
-  }
-  const imagePaths = attachments
-    .filter((attachment) => attachment.kind === 'image')
-    .map((attachment) => attachment.path);
+  const directAttachments = await media.resolve(chatId, resourceItems);
 
   // Collect any reply-quote targets in the batch. Dedup so the same target
   // quoted by multiple messages in one batch only fetches once. Filter out
@@ -738,9 +735,25 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         messageId: targetId,
         type: q.rawContentType,
         contentChars: q.content.length,
+        resources: q.resources.length,
       });
     }
   }
+  // "Reply to a file and ask about it": pull the QUOTED messages' attachments
+  // into this run too, keyed by the quoted message id for the resource API.
+  const quoteResourceItems = quotes.flatMap((q) =>
+    q.resources.map((resource) => ({ messageId: q.messageId, resource })),
+  );
+  const attachments = [
+    ...directAttachments,
+    ...(await media.resolve(chatId, quoteResourceItems)),
+  ];
+  if (attachments.length > 0) {
+    log.info('media', 'resolved', { count: attachments.length, quoted: quoteResourceItems.length });
+  }
+  const imagePaths = attachments
+    .filter((attachment) => attachment.kind === 'image')
+    .map((attachment) => attachment.path);
 
   const prompt = buildPrompt(batch, attachments, quotes);
   log.info('prompt', 'built', { promptChars: prompt.length, quotes: quotes.length });
