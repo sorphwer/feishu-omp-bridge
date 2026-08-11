@@ -1,5 +1,28 @@
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { buildProfileRunArgs, profileHookSource, profileOverlayYaml } from './guest-lockdown';
+
+type ToolCallHandler = (event: {
+  toolName: string;
+  input?: Record<string, unknown>;
+}) => Promise<{ block: true; reason: string } | undefined>;
+
+/** Write the generated hook to disk, import it, and capture its tool_call handler. */
+async function loadHookHandler(source: string): Promise<ToolCallHandler> {
+  const dir = await mkdtemp(join(tmpdir(), 'glh-'));
+  const file = join(dir, 'hook.mjs');
+  await writeFile(file, source, 'utf8');
+  const mod = (await import(pathToFileURL(file).href)) as {
+    default: (pi: { on: (ev: string, fn: ToolCallHandler) => void }) => void;
+  };
+  let handler: ToolCallHandler | undefined;
+  mod.default({ on: (_ev, fn) => { handler = fn; } });
+  if (!handler) throw new Error('hook registered no tool_call handler');
+  return handler;
+}
 
 describe('profileOverlayYaml', () => {
   it('disables discovery sources so config-sourced MCP never loads', () => {
@@ -55,6 +78,57 @@ describe('profileHookSource', () => {
     expect(src).toContain('const PER_TOOL = {"zendesk_kg":8}');
     expect(src).toContain('total > MAX_TOTAL');
     expect(src).toContain('counts[name] > cap');
+  });
+  describe('read path guard', () => {
+    async function setupFs() {
+      const base = await mkdtemp(join(tmpdir(), 'glr-'));
+      const root = join(base, 'media', 'oc_chat');
+      const other = join(base, 'media', 'oc_other');
+      await mkdir(root, { recursive: true });
+      await mkdir(other, { recursive: true });
+      await writeFile(join(root, 'report.log'), 'line1\nline2\n');
+      await writeFile(join(base, 'secret.txt'), 'nope');
+      await writeFile(join(other, 'foreign.log'), 'nope');
+      await symlink(join(base, 'secret.txt'), join(root, 'sneaky.txt'));
+      return { base, root, other };
+    }
+
+    it('allows reads inside the chat media root, selectors included', async () => {
+      const { root } = await setupFs();
+      const handler = await loadHookHandler(profileHookSource(['read'], noLimits, [root]));
+      expect(await handler({ toolName: 'read', input: { path: join(root, 'report.log') } })).toBeUndefined();
+      expect(await handler({ toolName: 'read', input: { path: `${join(root, 'report.log')}:1-2` } })).toBeUndefined();
+    });
+
+    it('blocks reads outside the root: absolute, .., sibling chat, symlink escape, missing path', async () => {
+      const { base, root, other } = await setupFs();
+      const handler = await loadHookHandler(profileHookSource(['read'], noLimits, [root]));
+      const cases = [
+        { path: join(base, 'secret.txt') },
+        { path: join(root, '..', '..', 'secret.txt') },
+        { path: join(other, 'foreign.log') },
+        { path: join(root, 'sneaky.txt') }, // symlink → outside
+        { path: join(root, 'does-not-exist.log') },
+        {},
+      ];
+      for (const input of cases) {
+        const res = await handler({ toolName: 'read', input });
+        expect(res?.block, JSON.stringify(input)).toBe(true);
+      }
+    });
+
+    it('blocks every read when read is granted but no roots are passed', async () => {
+      const { root } = await setupFs();
+      const handler = await loadHookHandler(profileHookSource(['read'], noLimits));
+      const res = await handler({ toolName: 'read', input: { path: join(root, 'report.log') } });
+      expect(res?.block).toBe(true);
+    });
+
+    it('leaves non-read allowlisted tools untouched', async () => {
+      const { root } = await setupFs();
+      const handler = await loadHookHandler(profileHookSource(['read', 'zendesk_kg'], noLimits, [root]));
+      expect(await handler({ toolName: 'zendesk_kg', input: { args: ['search', 'x'] } })).toBeUndefined();
+    });
   });
 });
 

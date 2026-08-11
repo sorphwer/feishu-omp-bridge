@@ -26,7 +26,7 @@ export class MediaCache {
 
   async resolve(chatId: string, items: ResourceRequest[]): Promise<LocalAttachment[]> {
     if (items.length === 0) return [];
-    const dir = dirFor(chatId);
+    const dir = chatMediaDir(chatId);
     await mkdir(dir, { recursive: true });
 
     const results: LocalAttachment[] = [];
@@ -104,7 +104,11 @@ export async function gcMediaCache(maxAgeMs: number): Promise<void> {
   if (removed > 0) log.info('media', 'gc', { removed });
 }
 
-function dirFor(chatId: string): string {
+/**
+ * Directory where this chat's Feishu attachments are cached. Exported so the
+ * restricted-profile read guard can whitelist exactly this directory.
+ */
+export function chatMediaDir(chatId: string): string {
   const safe = chatId.replace(/[^a-zA-Z0-9_-]/g, '_');
   return join(paths.mediaDir, safe);
 }

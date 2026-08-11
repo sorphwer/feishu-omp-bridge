@@ -40,7 +40,7 @@ import {
 import { injectionDecision, resolveBatchProfile } from '../config/policy';
 import { resolveAppSecret, resolveRelaySecret } from '../config/secret-resolver';
 import { log, withTrace } from '../core/logger';
-import { MediaCache, type LocalAttachment } from '../media/cache';
+import { MediaCache, chatMediaDir, type LocalAttachment } from '../media/cache';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
@@ -784,7 +784,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // emits `--tools`/hook only for restricted profiles and the discovery/memory
   // overlay whenever the profile turns either off (so a `full` profile's
   // discovery/memory/feishu knobs are never silently ignored).
-  const guestArgs: GuestRunArgs = await buildProfileRunArgs(profile);
+  const guestArgs: GuestRunArgs = await buildProfileRunArgs(profile, {
+    readRoots: [chatMediaDir(chatId)],
+  });
   const commandTools = buildCommandTools(profile.commandTools, cwd);
   const hostTools = profile.feishuHostTools
     ? [...feishuHost.tools, ...commandTools]
