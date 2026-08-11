@@ -336,6 +336,15 @@ export interface ProfileConfig {
   commandTools?: CommandToolConfig[];
   /** Expose the Feishu host tools. Default: `true` for full, `false` for restricted. */
   feishuHostTools?: boolean;
+  /**
+   * Expose the scoped chat-history host tools (`feishu_list_recent`,
+   * `feishu_fetch_attachment`): list the last N messages of the CURRENT chat
+   * and download a listed message's attachment into the chat media cache.
+   * Requires the app scope `im:message.group_msg`. Default: false.
+   */
+  historyTools?: boolean;
+  /** Max messages `feishu_list_recent` returns (clamped 1-50). Default: 18. */
+  historyLimit?: number;
   /** Total tool calls per run across all tools (restricted only). 0/unset = no cap. */
   maxToolCalls?: number;
   /** System-prompt text PREPENDED to the user prompt for this profile. */

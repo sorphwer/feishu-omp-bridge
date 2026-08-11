@@ -5,7 +5,7 @@ import { paths } from '../config/paths';
 import type { ResolvedProfile } from '../config/policy';
 import type { GuestToolLimits } from '../config/schema';
 import { log } from '../core/logger';
-import { FEISHU_HOST_TOOL_NAMES } from './feishu-host';
+import { CHAT_HISTORY_TOOL_NAMES, FEISHU_HOST_TOOL_NAMES } from './feishu-host';
 
 /**
  * Restricted-profile sandbox: when a run resolves to a restricted profile
@@ -222,6 +222,7 @@ export async function buildProfileRunArgs(
           ...profile.builtinTools,
           ...profile.commandTools.map((t) => t.name),
           ...(profile.feishuHostTools ? FEISHU_HOST_TOOL_NAMES : []),
+          ...(profile.historyTools ? CHAT_HISTORY_TOOL_NAMES : []),
         ]),
       ]
     : [];
@@ -229,6 +230,12 @@ export async function buildProfileRunArgs(
   let hook = '';
   if (restricted) {
     const perTool: Record<string, number> = {};
+    if (profile.historyTools) {
+      // Hard per-run caps for the history surface: enough to find and pull a
+      // few files, not enough to trawl the chat.
+      perTool.feishu_list_recent = 3;
+      perTool.feishu_fetch_attachment = 5;
+    }
     for (const t of profile.commandTools) {
       if (typeof t.maxCalls === 'number') perTool[t.name] = t.maxCalls;
     }

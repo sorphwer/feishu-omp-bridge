@@ -24,6 +24,9 @@ export interface QuotedContext {
    * caller resolves these through the media cache — using the QUOTED
    * message's id — so "reply to a file and ask about it" works. */
   resources: ResourceDescriptor[];
+  /** Chat the quoted message belongs to. Empty when the API omits it.
+   * feishu_fetch_attachment uses this to refuse cross-chat downloads. */
+  chatId: string;
 }
 
 /**
@@ -142,6 +145,9 @@ export async function fetchQuotedContext(
       content: expandInteractiveCard(normalized.content, parent.body?.content),
       rawContentType: parent.msg_type ?? 'text',
       resources: normalized.resources ?? [],
+      chatId: typeof (parent as { chat_id?: unknown }).chat_id === 'string'
+        ? (parent as { chat_id: string }).chat_id
+        : '',
     };
   } catch (err) {
     log.warn('quote', 'normalize-failed', {

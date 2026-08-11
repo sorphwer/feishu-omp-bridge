@@ -1,5 +1,6 @@
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
 import type { AgentHostTool, AgentHostUriScheme } from '../agent/types';
+import type { MediaCache } from '../media/cache';
 import { fetchQuotedContext } from './quote';
 
 export interface FeishuHostContext {
@@ -27,6 +28,137 @@ export const FEISHU_HOST_TOOL_NAMES = [
   'feishu_reply_message',
   'feishu_get_message',
 ] as const;
+/**
+ * Names of the scoped chat-history host tools registered by
+ * {@link createChatHistoryTools}. Exposed only when the profile sets
+ * `historyTools: true`; the sandbox hook must allowlist them likewise.
+ */
+export const CHAT_HISTORY_TOOL_NAMES = ['feishu_list_recent', 'feishu_fetch_attachment'] as const;
+
+/**
+ * Scoped pull-model history access for restricted profiles: list the last N
+ * messages of the CURRENT chat only (the chat id is baked in — the model
+ * cannot point these at another chat), then download a listed message's
+ * attachment into this chat's media cache on demand. Requires the Feishu app
+ * scope `im:message.group_msg`; without it the tools surface the API error.
+ */
+export function createChatHistoryTools(
+  channel: LarkChannel,
+  ctx: FeishuHostContext,
+  media: MediaCache,
+  limit: number,
+): AgentHostTool[] {
+  return [listRecentTool(channel, ctx, limit), fetchAttachmentTool(channel, ctx, media)];
+}
+
+const ATTACHMENT_MSG_TYPES = new Set(['file', 'image', 'media', 'audio', 'video']);
+
+/** Best-effort one-line summary of a raw message body for the history list. */
+function summarizeBody(msgType: string, raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof parsed.text === 'string') return parsed.text.slice(0, 200);
+    if (typeof parsed.file_name === 'string') return `[${msgType}] ${parsed.file_name}`;
+    if (typeof parsed.image_key === 'string') return '[image]';
+  } catch {
+    /* fall through to raw */
+  }
+  return `[${msgType}] ${raw.slice(0, 200)}`;
+}
+
+function listRecentTool(channel: LarkChannel, ctx: FeishuHostContext, limit: number): AgentHostTool {
+  return {
+    definition: {
+      name: 'feishu_list_recent',
+      label: 'List recent chat messages',
+      description:
+        `List the most recent messages (up to ${limit}) of the CURRENT Feishu chat, oldest first. ` +
+        'Each item has message_id, type, created_at, sender_open_id, summary, and has_attachment. '
+        + 'Use feishu_fetch_attachment with a message_id to download an attachment for reading.',
+      parameters: objectSchema({}),
+    },
+    async execute() {
+      try {
+        const r = (await channel.rawClient.im.v1.message.list({
+          params: {
+            container_id_type: 'chat',
+            container_id: ctx.chatId,
+            sort_type: 'ByCreateTimeDesc',
+            page_size: limit,
+          },
+        })) as { data?: { items?: Array<Record<string, unknown>> } };
+        const items = (r?.data?.items ?? []).slice(0, limit).reverse();
+        const mapped = items.map((it) => {
+          const msgType = typeof it.msg_type === 'string' ? it.msg_type : 'unknown';
+          const body = it.body as { content?: string } | undefined;
+          const createMs = Number.parseInt(String(it.create_time ?? ''), 10);
+          return {
+            message_id: it.message_id,
+            type: msgType,
+            created_at: Number.isFinite(createMs) && createMs > 0 ? new Date(createMs).toISOString() : '',
+            sender_open_id: (it.sender as { id?: string } | undefined)?.id ?? '',
+            summary: summarizeBody(msgType, body?.content ?? ''),
+            has_attachment: ATTACHMENT_MSG_TYPES.has(msgType),
+          };
+        });
+        return { result: jsonResult(mapped) };
+      } catch (err) {
+        return { result: textResult(`feishu_list_recent failed: ${describeApiError(err)}`), isError: true };
+      }
+    },
+  };
+}
+
+function fetchAttachmentTool(channel: LarkChannel, ctx: FeishuHostContext, media: MediaCache): AgentHostTool {
+  return {
+    definition: {
+      name: 'feishu_fetch_attachment',
+      label: 'Fetch chat attachment',
+      description:
+        'Download the attachment(s) of a message in the CURRENT chat into the local media cache ' +
+        'and return the local file path(s) for the read tool. Only works for messages of this chat.',
+      parameters: objectSchema({
+        messageId: { type: 'string', description: 'message_id (from feishu_list_recent or a quote) whose attachment to download.' },
+      }, ['messageId']),
+    },
+    async execute(args) {
+      const messageId = requiredString(args, 'messageId');
+      try {
+        const message = await fetchQuotedContext(channel, messageId);
+        if (!message) {
+          return { result: textResult(`message not found or inaccessible: ${messageId}`), isError: true };
+        }
+        // Fail closed: an empty chatId (API omitted it) is refused too — never
+        // allow a cross-chat (or unverifiable) download.
+        if (message.chatId !== ctx.chatId) {
+          return { result: textResult('refused: that message does not verifiably belong to this chat.'), isError: true };
+        }
+        if (message.resources.length === 0) {
+          return { result: textResult(`message ${messageId} (type ${message.rawContentType}) carries no attachment.`), isError: true };
+        }
+        const attachments = await media.resolve(
+          ctx.chatId,
+          message.resources.map((resource) => ({ messageId, resource })),
+        );
+        if (attachments.length === 0) {
+          return { result: textResult('attachment download failed (see bridge logs).'), isError: true };
+        }
+        return {
+          result: jsonResult(attachments.map((a) => ({ path: a.path, kind: a.kind, name: a.originalName ?? null }))),
+        };
+      } catch (err) {
+        return { result: textResult(`feishu_fetch_attachment failed: ${describeApiError(err)}`), isError: true };
+      }
+    },
+  };
+}
+
+/** Flatten a Feishu SDK error into its API message when available. */
+function describeApiError(err: unknown): string {
+  const resp = (err as { response?: { data?: { code?: number; msg?: string } } })?.response?.data;
+  if (resp?.msg) return `${resp.msg}${resp.code ? ` (code ${resp.code})` : ''}`;
+  return err instanceof Error ? err.message : String(err);
+}
 
 export function createFeishuHostIntegration(
   channel: LarkChannel,

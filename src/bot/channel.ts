@@ -48,7 +48,7 @@ import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { handleCommentMention } from './comments';
 import { buildCommandTools } from './command-tools';
 import { buildProfileRunArgs, type GuestRunArgs } from './guest-lockdown';
-import { createFeishuHostIntegration } from './feishu-host';
+import { createChatHistoryTools, createFeishuHostIntegration } from './feishu-host';
 import { expandInteractiveCard } from './interactive-card';
 import { startKeepalive } from './keepalive';
 import { configureNetwork, type NetworkOverrides } from './network-config';
@@ -801,9 +801,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     readRoots: [chatMediaDir(chatId)],
   });
   const commandTools = buildCommandTools(profile.commandTools, cwd);
-  const hostTools = profile.feishuHostTools
-    ? [...feishuHost.tools, ...commandTools]
-    : commandTools;
+  // Scoped pull-model history: list/download tools locked to THIS chat, gated
+  // by `historyTools` independently of the broader feishuHostTools surface.
+  const historyTools = profile.historyTools
+    ? createChatHistoryTools(channel, { scope, chatId, threadId, cwd }, media, profile.historyLimit)
+    : [];
+  const hostTools = [
+    ...(profile.feishuHostTools ? feishuHost.tools : []),
+    ...historyTools,
+    ...commandTools,
+  ];
   const hostUriSchemes = profile.feishuHostTools ? feishuHost.uriSchemes : [];
   let runPrompt = prompt;
   // Profile system prompt is PREPENDED to the user prompt (same proven path as

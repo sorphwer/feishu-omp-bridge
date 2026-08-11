@@ -136,7 +136,7 @@ describe('buildProfileRunArgs', () => {
   it('passes a plain full profile through with no run args', async () => {
     const args = await buildProfileRunArgs({
       name: 'full', restricted: false, builtinTools: [], commandTools: [],
-      feishuHostTools: true, discovery: true, memory: true, maxToolCalls: 0, extensions: [],
+      feishuHostTools: true, historyTools: false, historyLimit: 18, discovery: true, memory: true, maxToolCalls: 0, extensions: [],
     });
     expect(args.tools).toBeUndefined();
     expect(args.configOverlayPaths).toEqual([]);
@@ -146,7 +146,7 @@ describe('buildProfileRunArgs', () => {
   it('appends a full profile’s custom extension hooks (no generated artifacts)', async () => {
     const args = await buildProfileRunArgs({
       name: 'fx', restricted: false, builtinTools: [], commandTools: [],
-      feishuHostTools: true, discovery: true, memory: true, maxToolCalls: 0,
+      feishuHostTools: true, historyTools: false, historyLimit: 18, discovery: true, memory: true, maxToolCalls: 0,
       extensions: ['/abs/custom-hook.mjs'],
     });
     expect(args.tools).toBeUndefined();
@@ -158,7 +158,7 @@ describe('buildProfileRunArgs', () => {
     const args = await buildProfileRunArgs({
       name: 'kb', restricted: true, builtinTools: ['read'],
       commandTools: [{ name: 'zendesk_kg', command: 'zendesk-kg', timeoutMs: 1000, maxOutputBytes: 1000 }],
-      feishuHostTools: true, discovery: false, memory: false, maxToolCalls: 0, extensions: [],
+      feishuHostTools: true, historyTools: false, historyLimit: 18, discovery: false, memory: false, maxToolCalls: 0, extensions: [],
     });
     expect(args.tools).toBe('read');
     expect(args.noBuiltins).toBe(false);
@@ -169,9 +169,24 @@ describe('buildProfileRunArgs', () => {
     const args = await buildProfileRunArgs({
       name: 'locked', restricted: true, builtinTools: [],
       commandTools: [{ name: 'zendesk_kg', command: 'zendesk-kg', timeoutMs: 1000, maxOutputBytes: 1000 }],
-      feishuHostTools: false, discovery: false, memory: false, maxToolCalls: 0, extensions: [],
+      feishuHostTools: false, historyTools: false, historyLimit: 18, discovery: false, memory: false, maxToolCalls: 0, extensions: [],
     });
     expect(args.tools).toBeUndefined();
     expect(args.noBuiltins).toBe(true);
+  });
+  it('allowlists + caps the history tools when historyTools is on', async () => {
+    const args = await buildProfileRunArgs({
+      name: 'kb', restricted: true, builtinTools: ['read'],
+      commandTools: [],
+      feishuHostTools: false, historyTools: true, historyLimit: 18, discovery: false, memory: false, maxToolCalls: 0, extensions: [],
+    });
+    const hookPath = args.extensionPaths[0]!;
+    const { readFile } = await import('node:fs/promises');
+    const hook = await readFile(hookPath, 'utf8');
+    expect(hook).toContain('"feishu_list_recent"');
+    expect(hook).toContain('"feishu_fetch_attachment"');
+    expect(hook).toContain('"feishu_list_recent":3');
+    expect(hook).toContain('"feishu_fetch_attachment":5');
+    expect(args.tools).toBe('read'); // host tools never leak into --tools
   });
 });

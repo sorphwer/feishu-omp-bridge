@@ -47,6 +47,10 @@ export interface ResolvedProfile {
   commandTools: CommandToolConfig[];
   /** Whether the Feishu host tools are exposed. */
   feishuHostTools: boolean;
+  /** Scoped chat-history host tools (list recent / fetch attachment). */
+  historyTools: boolean;
+  /** Max messages feishu_list_recent returns (clamped 1-50). */
+  historyLimit: number;
   /** OMP discovery sources (external MCP) enabled. */
   discovery: boolean;
   /** Shared memory (retain/recall/reflect) enabled. */
@@ -66,6 +70,8 @@ export interface PolicyContext {
   chatId?: string;
 }
 
+const DEFAULT_HISTORY_LIMIT = 18;
+
 /** Built-in `full`: the unrestricted tool set, no sandbox. */
 const FULL_PROFILE: ResolvedProfile = {
   name: 'full',
@@ -73,6 +79,8 @@ const FULL_PROFILE: ResolvedProfile = {
   builtinTools: [],
   commandTools: [],
   feishuHostTools: true,
+  historyTools: false,
+  historyLimit: DEFAULT_HISTORY_LIMIT,
   discovery: true,
   memory: true,
   maxToolCalls: 0,
@@ -86,12 +94,19 @@ const LOCKED_PROFILE: ResolvedProfile = {
   builtinTools: [],
   commandTools: [],
   feishuHostTools: false,
+  historyTools: false,
+  historyLimit: DEFAULT_HISTORY_LIMIT,
   discovery: false,
   memory: false,
   maxToolCalls: 0,
   extensions: [],
 };
 
+/** Clamp a configured history limit to [1,50]; default 18. */
+function histLimit(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return DEFAULT_HISTORY_LIMIT;
+  return Math.min(50, Math.max(1, Math.floor(v)));
+}
 function strNonEmpty(v: unknown): v is string {
   return typeof v === 'string' && v.trim() !== '';
 }
@@ -184,6 +199,8 @@ export function resolveProfile(
       builtinTools: [],
       commandTools: normalizeCommandTools(p.commandTools),
       feishuHostTools: p.feishuHostTools !== false,
+      historyTools: p.historyTools === true,
+      historyLimit: histLimit(p.historyLimit),
       discovery: p.discovery !== 'off',
       memory: p.memory !== 'off',
       maxToolCalls: 0,
@@ -198,6 +215,8 @@ export function resolveProfile(
     builtinTools: cleanList(p.tools),
     commandTools: normalizeCommandTools(p.commandTools),
     feishuHostTools: p.feishuHostTools === true,
+    historyTools: p.historyTools === true,
+    historyLimit: histLimit(p.historyLimit),
     discovery: p.discovery === 'on',
     memory: p.memory === 'on',
     maxToolCalls:
