@@ -54,8 +54,9 @@ process.on('unhandledRejection', (reason) => {
 process.on('uncaughtException', (err) => {
   log.fail('process', err, { kind: 'uncaughtException' });
 });
-
 const MEDIA_GC_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** Re-run the media-cache GC this often; the process runs for weeks. */
+const MEDIA_GC_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export interface StartOptions {
   config?: string;
@@ -122,6 +123,13 @@ export async function runStart(opts: StartOptions): Promise<void> {
 
   await gcMediaCache(MEDIA_GC_MAX_AGE_MS);
   await gcOldLogs();
+  // The bridge runs for weeks between restarts — a startup-only GC would let
+  // downloaded chat attachments pile up. Re-sweep periodically; unref'd so
+  // the timer never keeps a shutting-down process alive.
+  setInterval(() => {
+    void gcMediaCache(MEDIA_GC_MAX_AGE_MS);
+    void gcOldLogs();
+  }, MEDIA_GC_INTERVAL_MS).unref();
 
   // Same-app conflict detection. Open-platform routes events to one of the
   // long-connections at random, so two `start` of the same app makes "who
